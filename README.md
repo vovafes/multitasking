@@ -1,4 +1,4 @@
-# DIAMOND Bot — Памятка
+# Multitasking — Памятка
 
 ---
 

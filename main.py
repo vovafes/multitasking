@@ -91,10 +91,10 @@ mp_roles: dict = {}
 # 🔫 РОЛЬ ВЗП { guild_id: role_id }
 vzp_roles: dict = {}
 
-# 🛒 МАГАЗИН
-SHOP_ITEMS = {
-    "remove_warn": {"name": "Снять warn", "price": 500, "emoji": "⚠️"},
-}
+# 🛒 ТОВАРЫ МАГАЗИНА per-guild
+# { guild_id: { item_id: { "name": str, "price": int, "emoji": str, "description": str,
+#               "action": "remove_warn"|"give_role"|"notify", "role_id": int|None } } }
+guild_shop_items: dict = {}
 
 # 🔑 РОЛЬ АДМИНИСТРАТОРА { guild_id: role_id }
 admin_roles: dict = {}
@@ -315,20 +315,24 @@ def build_points_embed(guild_id: int, user_id: int) -> discord.Embed:
     return embed
 
 
-def build_shop_embed() -> discord.Embed:
+def build_shop_embed(guild_id: int) -> discord.Embed:
+    items = guild_shop_items.get(guild_id, {})
     embed = discord.Embed(
-        title="🛒 Магазин DIAMOND",
+        title="🛒 Магазин",
         description=(
             "Трать заработанные баллы на полезные товары.\n"
-            "Свой баланс смотри командой `/баланс`\n\u200B"
+            "Свой баланс смотри командой `!баланс`\n\u200B"
         ),
         color=discord.Color.gold(),
         timestamp=datetime.now(),
     )
-    for item_id, item in SHOP_ITEMS.items():
+    if not items:
+        embed.add_field(name="Пусто", value="*Товары ещё не добавлены*", inline=False)
+    for item_id, item in items.items():
+        action_label = {"remove_warn": "Снимает варн", "give_role": "Выдаёт роль", "notify": "Ручная выдача"}.get(item["action"], "")
         embed.add_field(
             name=f"{item['emoji']} {item['name']}",
-            value=f"Цена: **{item['price']}** 💎\n*Нажми кнопку ниже*",
+            value=f"Цена: **{item['price']}** 💎\n{item.get('description', '')}\n*{action_label}*",
             inline=True,
         )
     embed.set_footer(text="DIAMOND", icon_url=FOOTER_ICON)
@@ -359,6 +363,7 @@ def save_data():
         "admin_roles":          {str(g): v for g, v in admin_roles.items()},
         "ticket_viewer_roles":  {str(g): v for g, v in ticket_viewer_roles.items()},
         "ticket_ping_role":     {str(g): v for g, v in ticket_ping_role.items()},
+        "guild_shop_items":     {str(g): v for g, v in guild_shop_items.items()},
     }
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -406,6 +411,8 @@ def load_data():
             ticket_viewer_roles[int(g)] = v
         for g, v in data.get("ticket_ping_role", {}).items():
             ticket_ping_role[int(g)] = v
+        for g, v in data.get("guild_shop_items", {}).items():
+            guild_shop_items[int(g)] = v
         print("OK: Data loaded from data.json")
     except Exception as e:
         print(f"WARNING: Failed to load data: {e}")
@@ -893,44 +900,120 @@ class ApplicationReviewView(ui.View):
 
 
 # ─────────────────────────────────────────────
+# ─────────────────────────────────────────────
 # МАГАЗИН - КНОПКИ
 # ─────────────────────────────────────────────
-class ShopView(ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
+async def refresh_shop_message(guild: discord.Guild):
+    panel = shop_panels.get(guild.id)
+    if not panel:
+        return
+    try:
+        channel = guild.get_channel(panel["channel_id"])
+        msg     = await channel.fetch_message(panel["message_id"])
+        view    = ShopView(guild.id)
+        await msg.edit(embed=build_shop_embed(guild.id), view=view)
+    except Exception:
+        pass
 
-    @ui.button(label="Снять warn", style=discord.ButtonStyle.danger, emoji="⚠️", custom_id="shop_remove_warn")
-    async def remove_warn(self, interaction: discord.Interaction, button: ui.Button):
-        guild_id = interaction.guild_id
-        user_id = interaction.user.id
-        
-        item = SHOP_ITEMS["remove_warn"]
-        points = get_points(guild_id, user_id)
-        
-        if points < item["price"]:
-            return await interaction.response.send_message(
-                f"❌ Недостаточно баллов! Нужно **{item['price']}** 💎, у вас **{points}** 💎",
-                ephemeral=True
-            )
-        
-        warn_data = get_warns(guild_id, user_id)
-        if not warn_data:
-            return await interaction.response.send_message(
-                "✅ У вас нет warn'ов для снятия!",
-                ephemeral=True
-            )
-        
-        # Снять warn и списать баллы
-        remove_warn(guild_id, user_id)
-        add_points(guild_id, user_id, -item["price"])
-        
-        embed = discord.Embed(
-            title="✅ Warn снят!",
-            description=f"С вас списано **{item['price']}** 💎",
-            color=discord.Color.green(),
-            timestamp=datetime.now(),
+
+class ShopItemButton(ui.Button):
+    def __init__(self, item_id: str, item: dict, guild_id: int):
+        super().__init__(
+            label=item["name"],
+            emoji=item.get("emoji") or None,
+            style=discord.ButtonStyle.primary,
+            custom_id=f"shop_{guild_id}_{item_id}",
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        self.item_id  = item_id
+        self.item     = item
+        self.guild_id = guild_id
+
+    async def callback(self, interaction: discord.Interaction):
+        guild_id = interaction.guild_id
+        user_id  = interaction.user.id
+        item     = guild_shop_items.get(guild_id, {}).get(self.item_id)
+
+        if not item:
+            return await interaction.response.send_message("❌ Товар больше не доступен.", ephemeral=True)
+
+        price  = item["price"]
+        points = get_points(guild_id, user_id)
+
+        if points < price:
+            return await interaction.response.send_message(
+                f"❌ Недостаточно баллов! Нужно **{price}** 💎, у вас **{points}** 💎",
+                ephemeral=True,
+            )
+
+        action = item.get("action", "notify")
+
+        if action == "remove_warn":
+            warn_data = get_warns(guild_id, user_id)
+            if not warn_data:
+                return await interaction.response.send_message("✅ У вас нет варнов для снятия!", ephemeral=True)
+            # Убрать варн-роли
+            guild_warn_roles = warn_roles.get(guild_id, {})
+            roles_to_remove = [interaction.guild.get_role(rid) for rid in guild_warn_roles.values()]
+            try:
+                await interaction.user.remove_roles(*[r for r in roles_to_remove if r], reason="Покупка: снятие варна")
+            except Exception:
+                pass
+            remove_warn(guild_id, user_id)
+            add_points(guild_id, user_id, -price)
+            embed = discord.Embed(title="✅ Варн снят!", description=f"Списано **{price}** 💎", color=discord.Color.green(), timestamp=datetime.now())
+            embed.set_footer(text="DIAMOND", icon_url=FOOTER_ICON)
+            return await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        elif action == "give_role":
+            role_id = item.get("role_id")
+            role    = interaction.guild.get_role(role_id) if role_id else None
+            if not role:
+                return await interaction.response.send_message("❌ Роль не найдена. Обратитесь к администратору.", ephemeral=True)
+            try:
+                await interaction.user.add_roles(role, reason=f"Покупка в магазине: {item['name']}")
+            except Exception:
+                return await interaction.response.send_message("❌ Не удалось выдать роль.", ephemeral=True)
+            add_points(guild_id, user_id, -price)
+            embed = discord.Embed(title=f"✅ Куплено: {item['name']}", description=f"Роль {role.mention} выдана!\nСписано **{price}** 💎", color=discord.Color.green(), timestamp=datetime.now())
+            embed.set_footer(text="DIAMOND", icon_url=FOOTER_ICON)
+            return await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        else:  # notify — ручная выдача
+            add_points(guild_id, user_id, -price)
+            # Уведомление в лог-канал если есть
+            log_channel_id = reject_log_channels.get(guild_id)
+            if log_channel_id:
+                log_ch = interaction.guild.get_channel(log_channel_id)
+                if log_ch:
+                    log_embed = discord.Embed(
+                        title="🛒 Покупка в магазине",
+                        color=discord.Color.gold(),
+                        timestamp=datetime.now(),
+                    )
+                    log_embed.add_field(name="Покупатель", value=interaction.user.mention, inline=True)
+                    log_embed.add_field(name="Товар", value=item["name"], inline=True)
+                    log_embed.add_field(name="Цена", value=f"{price} 💎", inline=True)
+                    log_embed.set_footer(text="DIAMOND", icon_url=FOOTER_ICON)
+                    try:
+                        await log_ch.send(embed=log_embed)
+                    except Exception:
+                        pass
+            embed = discord.Embed(
+                title=f"✅ Куплено: {item['name']}",
+                description=f"Списано **{price}** 💎\nАдминистратор скоро свяжется с вами.",
+                color=discord.Color.green(),
+                timestamp=datetime.now(),
+            )
+            embed.set_footer(text="DIAMOND", icon_url=FOOTER_ICON)
+            return await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class ShopView(ui.View):
+    def __init__(self, guild_id: int = 0):
+        super().__init__(timeout=None)
+        items = guild_shop_items.get(guild_id, {})
+        for item_id, item in items.items():
+            self.add_item(ShopItemButton(item_id, item, guild_id))
 
 
 
@@ -1301,11 +1384,112 @@ async def balance(ctx, пользователь: discord.Member = None):
 async def slash_shop(interaction: discord.Interaction):
     if not is_admin(interaction):
         return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
-    embed = build_shop_embed()
-    view  = ShopView()
+    gid  = interaction.guild_id
+    embed = build_shop_embed(gid)
+    view  = ShopView(gid)
     msg   = await interaction.channel.send(embed=embed, view=view)
-    shop_panels[interaction.guild_id] = {"channel_id": interaction.channel_id, "message_id": msg.id}
+    shop_panels[gid] = {"channel_id": interaction.channel_id, "message_id": msg.id}
     await interaction.response.send_message("✅ Панель магазина развёрнута!", ephemeral=True)
+
+
+class AddItemModal(ui.Modal, title="🛒 Добавить товар"):
+    name        = ui.TextInput(label="Название товара", placeholder="Снять варн", required=True)
+    price       = ui.TextInput(label="Цена (баллы)", placeholder="500", required=True)
+    emoji       = ui.TextInput(label="Эмодзи", placeholder="⚠️", required=False, max_length=8)
+    description = ui.TextInput(label="Описание", placeholder="Снимает один варн", required=False)
+    action      = ui.TextInput(
+        label="Действие: remove_warn / give_role / notify",
+        placeholder="notify",
+        required=True,
+        max_length=50,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        gid = interaction.guild_id
+        try:
+            price_val = int(str(self.price).strip())
+        except ValueError:
+            return await interaction.response.send_message("❌ Цена должна быть числом.", ephemeral=True)
+
+        action_val = str(self.action).strip().lower()
+        if action_val not in ("remove_warn", "give_role", "notify"):
+            return await interaction.response.send_message(
+                "❌ Действие должно быть: `remove_warn`, `give_role` или `notify`", ephemeral=True
+            )
+
+        if gid not in guild_shop_items:
+            guild_shop_items[gid] = {}
+
+        import time
+        item_id = str(int(time.time()))
+        guild_shop_items[gid][item_id] = {
+            "name":        str(self.name).strip(),
+            "price":       price_val,
+            "emoji":       str(self.emoji).strip() or "🛒",
+            "description": str(self.description).strip(),
+            "action":      action_val,
+            "role_id":     None,
+        }
+        save_data()
+        await refresh_shop_message(interaction.guild)
+        await interaction.response.send_message(
+            f"✅ Товар **{self.name}** добавлен!\n"
+            f"Если действие `give_role` — используй `/товар_роль {item_id} @роль` для привязки роли.",
+            ephemeral=True,
+        )
+
+
+@tree.command(name="добавить_товар", description="Добавить товар в магазин")
+async def slash_add_item(interaction: discord.Interaction):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+    await interaction.response.send_modal(AddItemModal())
+
+
+@tree.command(name="убрать_товар", description="Удалить товар из магазина")
+@app_commands.describe(товар_id="ID товара (виден в /список_товаров)")
+async def slash_remove_item(interaction: discord.Interaction, товар_id: str):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+    gid   = interaction.guild_id
+    items = guild_shop_items.get(gid, {})
+    if товар_id not in items:
+        return await interaction.response.send_message("❌ Товар не найден.", ephemeral=True)
+    name = items[товар_id]["name"]
+    del guild_shop_items[gid][товар_id]
+    save_data()
+    await refresh_shop_message(interaction.guild)
+    await interaction.response.send_message(f"✅ Товар **{name}** удалён.", ephemeral=True)
+
+
+@tree.command(name="список_товаров", description="Список всех товаров в магазине (с ID)")
+async def slash_list_items(interaction: discord.Interaction):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+    gid   = interaction.guild_id
+    items = guild_shop_items.get(gid, {})
+    if not items:
+        return await interaction.response.send_message("Магазин пуст.", ephemeral=True)
+    lines = [f"`{iid}` — {i['emoji']} **{i['name']}** | {i['price']} 💎 | `{i['action']}`" for iid, i in items.items()]
+    embed = discord.Embed(title="🛒 Товары магазина", description="\n".join(lines), color=discord.Color.gold())
+    embed.set_footer(text="Используй ID для /убрать_товар или /товар_роль")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@tree.command(name="товар_роль", description="Привязать роль к товару с действием give_role")
+@app_commands.describe(товар_id="ID товара", роль="Роль которая выдаётся при покупке")
+async def slash_item_role(interaction: discord.Interaction, товар_id: str, роль: discord.Role):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+    gid   = interaction.guild_id
+    items = guild_shop_items.get(gid, {})
+    if товар_id not in items:
+        return await interaction.response.send_message("❌ Товар не найден.", ephemeral=True)
+    if items[товар_id]["action"] != "give_role":
+        return await interaction.response.send_message("❌ Действие товара не `give_role`.", ephemeral=True)
+    guild_shop_items[gid][товар_id]["role_id"] = роль.id
+    save_data()
+    await interaction.response.send_message(f"✅ Роль {роль.mention} привязана к товару **{items[товар_id]['name']}**.", ephemeral=True)
 
 
 @bot.command(name="дать")
@@ -1651,8 +1835,9 @@ async def on_ready():
     load_data()
     bot.add_view(AfkView())
     bot.add_view(InactiveView())
-    bot.add_view(ShopView())
     bot.add_view(ApplicationReviewView())
+    for guild_id in guild_shop_items:
+        bot.add_view(ShopView(guild_id))
     for guild_id, panel in ticket_panels.items():
         cat_id = panel.get("category_id")
         if cat_id:

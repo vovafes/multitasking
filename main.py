@@ -1726,6 +1726,11 @@ async def warn_user(ctx, пользователь: discord.Member, количе�
     except Exception:
         pass
 
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
+
 
 @bot.command(name="снять_варн")
 async def admin_remove_warn(ctx, пользователь: discord.Member):
@@ -1750,6 +1755,11 @@ async def admin_remove_warn(ctx, пользователь: discord.Member):
         await ctx.send(embed=embed)
     else:
         await ctx.send("❌ У пользователя нет warn'ов!", delete_after=5)
+
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
 
 
 @bot.command(name="роль_варн")

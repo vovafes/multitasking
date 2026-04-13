@@ -1037,13 +1037,13 @@ async def set_event_role(ctx, роль: discord.Role):
     await ctx.message.delete()
 
 
-async def _create_event_message(channel, guild, title: str, max_count: int, image_file=None, image_ref: str | None = None, content: str | None = None):
+async def _create_event_message(channel, guild, title: str, max_count: int, image_file=None, image_ref: str | None = None, content: str | None = None, force_join_mode: bool = False):
     """Создаёт сбор: эмбед + тред. <= 24 слотов → кнопки-цифры, > 24 → одна кнопка ✅."""
     if not (1 <= max_count <= 100):
         await channel.send("❌ Количество слотов: от 1 до 100!", delete_after=5)
         return
 
-    join_mode = max_count > 24
+    join_mode = force_join_mode or max_count > 24
     slots     = {i: None for i in range(1, max_count + 1)}
 
     embed = build_event_embed(title, max_count, slots, image_ref, join_mode=join_mode)
@@ -1227,7 +1227,7 @@ async def реаки_cmd(ctx, количество: int = 10, *, названи�
         if r:
             content = r.mention
 
-    await _create_event_message(ctx.channel, ctx.guild, название, количество, image_file, image_ref, content=content)
+    await _create_event_message(ctx.channel, ctx.guild, название, количество, image_file, image_ref, content=content, force_join_mode=True)
 
 
 @bot.command(name="афк")

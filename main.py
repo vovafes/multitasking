@@ -94,6 +94,13 @@ vzp_roles: dict = {}
 # 🎯 РОЛИ ДОСТУПА К КОМАНДАМ СБОРОВ { guild_id: { "взп": [role_id,...], "мп": [...], "реаки": [...] } }
 event_command_roles: dict = {}
 
+# 🔒 ПРИВАТНЫЕ КОМНАТЫ
+# { guild_id: { "create_channel_id": int, "category_id": int, "panel_channel_id": int } }
+private_vc_settings: dict = {}
+
+# { vc_channel_id: { "owner_id": int, "guild_id": int, "panel_msg_id": int|None, "panel_channel_id": int|None } }
+private_vcs: dict = {}
+
 # 🛒 ТОВАРЫ МАГАЗИНА per-guild
 # { guild_id: { item_id: { "name": str, "price": int, "emoji": str, "description": str,
 #               "action": "remove_warn"|"give_role"|"notify", "role_id": int|None } } }
@@ -375,6 +382,7 @@ def save_data():
         "ticket_ping_role":     {str(g): v for g, v in ticket_ping_role.items()},
         "guild_shop_items":     {str(g): v for g, v in guild_shop_items.items()},
         "event_command_roles":  {str(g): v for g, v in event_command_roles.items()},
+        "private_vc_settings":  {str(g): v for g, v in private_vc_settings.items()},
     }
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -426,6 +434,8 @@ def load_data():
             guild_shop_items[int(g)] = v
         for g, v in data.get("event_command_roles", {}).items():
             event_command_roles[int(g)] = v
+        for g, v in data.get("private_vc_settings", {}).items():
+            private_vc_settings[int(g)] = v
         print("OK: Data loaded from data.json")
     except Exception as e:
         print(f"WARNING: Failed to load data: {e}")
@@ -1881,6 +1891,304 @@ async def slash_settings(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+# ─────────────────────────────────────────────
+# ПРИВАТНЫЕ КОМНАТЫ
+# ─────────────────────────────────────────────
+def build_private_vc_embed(owner: discord.Member, vc: discord.VoiceChannel) -> discord.Embed:
+    limit = str(vc.user_limit) if vc.user_limit else "∞"
+    embed = discord.Embed(
+        title="🔒 Управление приватной комнатой",
+        description=(
+            "`+` • Добавить слот             `−` • Убрать слот\n"
+            "👥 • Изменить слоты            🔄 • Передать канал\n"
+            "🔓 • Открыть канал             🔒 • Закрыть канал\n"
+            "👤➕ • Добавить пользователя  👤➖ • Убрать пользователя\n"
+            "🙈 • Скрыть канал               👁 • Показать канал\n"
+            "✏️ • Переименовать              🚫 • Заблокировать\n\n"
+            "*Кнопки работают только для владельца канала.*"
+        ),
+        color=discord.Color.dark_red(),
+    )
+    embed.add_field(name="👑 Владелец", value=owner.mention, inline=True)
+    embed.add_field(name="🔊 Канал",    value=vc.mention,    inline=True)
+    embed.add_field(name="👥 Слоты",   value=limit,          inline=True)
+    embed.set_footer(text="DIAMOND", icon_url=FOOTER_ICON)
+    return embed
+
+
+async def resolve_member(guild: discord.Guild, text: str) -> discord.Member | None:
+    text = text.strip().lstrip("<@!").rstrip(">")
+    try:
+        return guild.get_member(int(text)) or await guild.fetch_member(int(text))
+    except Exception:
+        return discord.utils.find(
+            lambda m: m.name.lower() == text.lower() or m.display_name.lower() == text.lower(),
+            guild.members,
+        )
+
+
+class PVCRenameModal(ui.Modal, title="✏️ Переименовать канал"):
+    name = ui.TextInput(label="Новое название", max_length=100, required=True)
+    async def on_submit(self, interaction: discord.Interaction):
+        vc, _ = _get_owner_vc(interaction)
+        if not vc:
+            return await interaction.response.send_message("❌ У вас нет приватного канала!", ephemeral=True)
+        await vc.edit(name=str(self.name))
+        await interaction.response.send_message(f"✅ Канал переименован: **{self.name}**", ephemeral=True)
+
+class PVCSlotsModal(ui.Modal, title="👥 Изменить количество слотов"):
+    slots = ui.TextInput(label="Количество слотов (0 = без лимита)", placeholder="10", required=True, max_length=3)
+    async def on_submit(self, interaction: discord.Interaction):
+        vc, _ = _get_owner_vc(interaction)
+        if not vc:
+            return await interaction.response.send_message("❌ У вас нет приватного канала!", ephemeral=True)
+        try:
+            n = max(0, min(99, int(str(self.slots))))
+        except ValueError:
+            return await interaction.response.send_message("❌ Введите число.", ephemeral=True)
+        await vc.edit(user_limit=n)
+        label = str(n) if n else "∞"
+        await interaction.response.send_message(f"✅ Слотов: **{label}**", ephemeral=True)
+
+class PVCUserActionModal(ui.Modal):
+    user_input = ui.TextInput(label="Упомяните или введите ID пользователя", required=True)
+    def __init__(self, action: str):
+        titles = {
+            "add": "👤➕ Добавить пользователя",
+            "remove": "👤➖ Убрать пользователя",
+            "transfer": "🔄 Передать канал",
+            "block": "🚫 Заблокировать пользователя",
+        }
+        super().__init__(title=titles.get(action, "Действие"))
+        self.action = action
+
+    async def on_submit(self, interaction: discord.Interaction):
+        vc, data = _get_owner_vc(interaction)
+        if not vc:
+            return await interaction.response.send_message("❌ У вас нет приватного канала!", ephemeral=True)
+        member = await resolve_member(interaction.guild, str(self.user_input))
+        if not member:
+            return await interaction.response.send_message("❌ Пользователь не найден.", ephemeral=True)
+        if member == interaction.user:
+            return await interaction.response.send_message("❌ Нельзя применить к себе.", ephemeral=True)
+
+        if self.action == "add":
+            await vc.set_permissions(member, connect=True, view_channel=True)
+            await interaction.response.send_message(f"✅ {member.mention} добавлен в канал.", ephemeral=True)
+
+        elif self.action == "remove":
+            await vc.set_permissions(member, overwrite=None)
+            if member in vc.members:
+                await member.move_to(None)
+            await interaction.response.send_message(f"✅ {member.mention} убран из канала.", ephemeral=True)
+
+        elif self.action == "transfer":
+            private_vcs[vc.id]["owner_id"] = member.id
+            await vc.set_permissions(interaction.user, overwrite=None)
+            await vc.set_permissions(member, connect=True, manage_channels=True, move_members=True)
+            # Обновить панель
+            await _refresh_pvc_panel(interaction.guild, vc)
+            await interaction.response.send_message(f"✅ Канал передан {member.mention}.", ephemeral=True)
+
+        elif self.action == "block":
+            await vc.set_permissions(member, connect=False, view_channel=False)
+            if member in vc.members:
+                await member.move_to(None)
+            await interaction.response.send_message(f"✅ {member.mention} заблокирован.", ephemeral=True)
+
+
+def _get_owner_vc(interaction: discord.Interaction):
+    """Возвращает (VoiceChannel, data) приватного канала владельца."""
+    for vc_id, data in private_vcs.items():
+        if data["owner_id"] == interaction.user.id and data["guild_id"] == interaction.guild_id:
+            vc = interaction.guild.get_channel(vc_id)
+            if vc:
+                return vc, data
+    return None, None
+
+
+async def _refresh_pvc_panel(guild: discord.Guild, vc: discord.VoiceChannel):
+    data = private_vcs.get(vc.id)
+    if not data:
+        return
+    owner = guild.get_member(data["owner_id"])
+    if not owner:
+        return
+    panel_ch = guild.get_channel(data.get("panel_channel_id"))
+    if not panel_ch:
+        return
+    try:
+        msg = await panel_ch.fetch_message(data["panel_msg_id"])
+        await msg.edit(embed=build_private_vc_embed(owner, vc))
+    except Exception:
+        pass
+
+
+class PrivateVCView(ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @ui.button(emoji="➕", style=discord.ButtonStyle.secondary, custom_id="pvc_add_slot", row=0)
+    async def add_slot(self, interaction: discord.Interaction, button: ui.Button):
+        vc, _ = _get_owner_vc(interaction)
+        if not vc:
+            return await interaction.response.send_message("❌ У вас нет приватного канала!", ephemeral=True)
+        new_limit = (vc.user_limit or 0) + 1
+        await vc.edit(user_limit=new_limit)
+        await interaction.response.send_message(f"✅ Слотов: **{new_limit}**", ephemeral=True)
+
+    @ui.button(emoji="➖", style=discord.ButtonStyle.secondary, custom_id="pvc_remove_slot", row=0)
+    async def remove_slot(self, interaction: discord.Interaction, button: ui.Button):
+        vc, _ = _get_owner_vc(interaction)
+        if not vc:
+            return await interaction.response.send_message("❌ У вас нет приватного канала!", ephemeral=True)
+        new_limit = max(0, (vc.user_limit or 1) - 1)
+        await vc.edit(user_limit=new_limit)
+        label = str(new_limit) if new_limit else "∞"
+        await interaction.response.send_message(f"✅ Слотов: **{label}**", ephemeral=True)
+
+    @ui.button(emoji="👥", style=discord.ButtonStyle.secondary, custom_id="pvc_set_slots", row=0)
+    async def set_slots(self, interaction: discord.Interaction, button: ui.Button):
+        _, data = _get_owner_vc(interaction)
+        if not data:
+            return await interaction.response.send_message("❌ У вас нет приватного канала!", ephemeral=True)
+        await interaction.response.send_modal(PVCSlotsModal())
+
+    @ui.button(emoji="🔓", style=discord.ButtonStyle.secondary, custom_id="pvc_open", row=0)
+    async def open_channel(self, interaction: discord.Interaction, button: ui.Button):
+        vc, _ = _get_owner_vc(interaction)
+        if not vc:
+            return await interaction.response.send_message("❌ У вас нет приватного канала!", ephemeral=True)
+        await vc.set_permissions(interaction.guild.default_role, connect=True)
+        await interaction.response.send_message("✅ Канал открыт.", ephemeral=True)
+
+    @ui.button(emoji="🔒", style=discord.ButtonStyle.secondary, custom_id="pvc_close", row=0)
+    async def close_channel(self, interaction: discord.Interaction, button: ui.Button):
+        vc, _ = _get_owner_vc(interaction)
+        if not vc:
+            return await interaction.response.send_message("❌ У вас нет приватного канала!", ephemeral=True)
+        await vc.set_permissions(interaction.guild.default_role, connect=False)
+        await interaction.response.send_message("✅ Канал закрыт.", ephemeral=True)
+
+    @ui.button(emoji="👤", style=discord.ButtonStyle.secondary, custom_id="pvc_add_user", row=1)
+    async def add_user(self, interaction: discord.Interaction, button: ui.Button):
+        _, data = _get_owner_vc(interaction)
+        if not data:
+            return await interaction.response.send_message("❌ У вас нет приватного канала!", ephemeral=True)
+        await interaction.response.send_modal(PVCUserActionModal("add"))
+
+    @ui.button(emoji="🚷", style=discord.ButtonStyle.secondary, custom_id="pvc_remove_user", row=1)
+    async def remove_user(self, interaction: discord.Interaction, button: ui.Button):
+        _, data = _get_owner_vc(interaction)
+        if not data:
+            return await interaction.response.send_message("❌ У вас нет приватного канала!", ephemeral=True)
+        await interaction.response.send_modal(PVCUserActionModal("remove"))
+
+    @ui.button(emoji="🔄", style=discord.ButtonStyle.secondary, custom_id="pvc_transfer", row=1)
+    async def transfer(self, interaction: discord.Interaction, button: ui.Button):
+        _, data = _get_owner_vc(interaction)
+        if not data:
+            return await interaction.response.send_message("❌ У вас нет приватного канала!", ephemeral=True)
+        await interaction.response.send_modal(PVCUserActionModal("transfer"))
+
+    @ui.button(emoji="🙈", style=discord.ButtonStyle.secondary, custom_id="pvc_hide", row=1)
+    async def hide_channel(self, interaction: discord.Interaction, button: ui.Button):
+        vc, _ = _get_owner_vc(interaction)
+        if not vc:
+            return await interaction.response.send_message("❌ У вас нет приватного канала!", ephemeral=True)
+        await vc.set_permissions(interaction.guild.default_role, view_channel=False)
+        await interaction.response.send_message("✅ Канал скрыт.", ephemeral=True)
+
+    @ui.button(emoji="👁", style=discord.ButtonStyle.secondary, custom_id="pvc_show", row=1)
+    async def show_channel(self, interaction: discord.Interaction, button: ui.Button):
+        vc, _ = _get_owner_vc(interaction)
+        if not vc:
+            return await interaction.response.send_message("❌ У вас нет приватного канала!", ephemeral=True)
+        await vc.set_permissions(interaction.guild.default_role, view_channel=True)
+        await interaction.response.send_message("✅ Канал показан.", ephemeral=True)
+
+    @ui.button(emoji="✏️", style=discord.ButtonStyle.secondary, custom_id="pvc_rename", row=2)
+    async def rename(self, interaction: discord.Interaction, button: ui.Button):
+        _, data = _get_owner_vc(interaction)
+        if not data:
+            return await interaction.response.send_message("❌ У вас нет приватного канала!", ephemeral=True)
+        await interaction.response.send_modal(PVCRenameModal())
+
+    @ui.button(emoji="🚫", style=discord.ButtonStyle.secondary, custom_id="pvc_block", row=2)
+    async def block_user(self, interaction: discord.Interaction, button: ui.Button):
+        _, data = _get_owner_vc(interaction)
+        if not data:
+            return await interaction.response.send_message("❌ У вас нет приватного канала!", ephemeral=True)
+        await interaction.response.send_modal(PVCUserActionModal("block"))
+
+
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    settings = private_vc_settings.get(member.guild.id)
+    if not settings:
+        return
+
+    create_ch_id = settings.get("create_channel_id")
+
+    # Пользователь зашёл в канал-триггер
+    if after.channel and after.channel.id == create_ch_id:
+        category = member.guild.get_channel(settings.get("category_id"))
+        overwrites = {
+            member.guild.default_role: discord.PermissionOverwrite(connect=True, view_channel=True),
+            member: discord.PermissionOverwrite(connect=True, view_channel=True, manage_channels=True, move_members=True),
+            member.guild.me: discord.PermissionOverwrite(connect=True, view_channel=True, manage_channels=True, move_members=True),
+        }
+        try:
+            vc = await member.guild.create_voice_channel(
+                name=f"🔒 {member.display_name}",
+                category=category,
+                user_limit=10,
+                overwrites=overwrites,
+            )
+            await member.move_to(vc)
+        except Exception:
+            return
+
+        private_vcs[vc.id] = {
+            "owner_id": member.id,
+            "guild_id": member.guild.id,
+            "panel_msg_id": None,
+            "panel_channel_id": None,
+        }
+
+        panel_ch_id = settings.get("panel_channel_id")
+        if panel_ch_id:
+            panel_ch = member.guild.get_channel(panel_ch_id)
+            if panel_ch:
+                try:
+                    msg = await panel_ch.send(
+                        embed=build_private_vc_embed(member, vc),
+                        view=PrivateVCView(),
+                    )
+                    private_vcs[vc.id]["panel_msg_id"]     = msg.id
+                    private_vcs[vc.id]["panel_channel_id"] = panel_ch_id
+                except Exception:
+                    pass
+
+    # Пользователь вышел из приватного канала — удаляем если пусто
+    if before.channel and before.channel.id in private_vcs:
+        vc = before.channel
+        if len(vc.members) == 0:
+            data = private_vcs.pop(vc.id, {})
+            try:
+                await vc.delete(reason="Приватный канал опустел")
+            except Exception:
+                pass
+            if data.get("panel_msg_id") and data.get("panel_channel_id"):
+                panel_ch = member.guild.get_channel(data["panel_channel_id"])
+                if panel_ch:
+                    try:
+                        msg = await panel_ch.fetch_message(data["panel_msg_id"])
+                        await msg.delete()
+                    except Exception:
+                        pass
+
+
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
@@ -1905,11 +2213,41 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
             await interaction.response.send_message("❌ Ошибка выполнения команды.", ephemeral=True)
 
 
+@tree.command(name="приват", description="Настроить систему приватных комнат")
+@app_commands.describe(
+    канал_создания="Голосовой канал — зайди сюда, чтобы получить приватную комнату",
+    категория="Категория, где создаются приватные каналы",
+    канал_панели="Текстовый канал, куда присылается панель управления",
+)
+async def slash_private_vc(
+    interaction: discord.Interaction,
+    канал_создания: discord.VoiceChannel,
+    категория: discord.CategoryChannel,
+    канал_панели: discord.TextChannel,
+):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+    private_vc_settings[interaction.guild_id] = {
+        "create_channel_id": канал_создания.id,
+        "category_id":       категория.id,
+        "panel_channel_id":  канал_панели.id,
+    }
+    save_data()
+    await interaction.response.send_message(
+        f"✅ Приватные комнаты настроены!\n"
+        f"Триггер: {канал_создания.mention}\n"
+        f"Категория: **{категория.name}**\n"
+        f"Панель: {канал_панели.mention}",
+        ephemeral=True,
+    )
+
+
 @bot.event
 async def on_ready():
     load_data()
     bot.add_view(AfkView())
     bot.add_view(InactiveView())
+    bot.add_view(PrivateVCView())
     bot.add_view(ApplicationReviewView())
     for guild_id in guild_shop_items:
         bot.add_view(ShopView(guild_id))

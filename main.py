@@ -20,11 +20,18 @@ APPROVE_GIF_URL = "https://media0.giphy.com/media/v1.Y2lkPTc5MGI3NjExZ3VyczN2em0
 # Фото в АФК-панели (embed)
 AFK_IMAGE_URL = "https://i.imgur.com/umswh4i.gif"
 
-# Панель заявок — заголовок, текст, фото
-TICKET_TITLE     = "📋 Вступление в DIAMOND"
-TICKET_DESC      = "**TICKET OPEN MURRIETA**\nНабор в семью открыт на серверах: **Murrieta**\nДля тех кто играет ВЗП:\nПолный откат с 2 терр обновленного ВЗП и откат любого ДМ/архивы взп не позднее месячной давности.\nДля тех кто играет РП:\nОткаты с поставок/взх и откат любого ДМ не позднее месячной давности."
-TICKET_IMAGE_URL = "https://i.imgur.com/umswh4i.gif"
-FOOTER_ICON      = "https://i.imgur.com/nS7FHDR.png"
+FOOTER_ICON = "https://i.imgur.com/nS7FHDR.png"
+
+DEFAULT_TICKET_TITLE = "📋 Вступление в DIAMOND"
+DEFAULT_TICKET_DESC  = (
+    "**TICKET OPEN MURRIETA**\n"
+    "Набор в семью открыт на серверах: **Murrieta**\n\n"
+    "Для тех кто играет **ВЗП**:\n"
+    "Полный откат с 2 терр обновленного ВЗП и откат любого ДМ/архивы взп не позднее месячной давности.\n"
+    "Для тех кто играет **РП**:\n"
+    "Откаты с поставок/взх и откат любого ДМ не позднее месячной давности."
+)
+DEFAULT_TICKET_IMAGE = "https://i.imgur.com/umswh4i.gif"
 
 # ─────────────────────────────────────────────
 # ХРАНИЛИЩЕ
@@ -69,6 +76,9 @@ shop_panels: dict = {}
 # 🎫 ПАНЕЛЬ ТИКЕТОВ
 # { guild_id: { "panel_channel_id": int, "review_channel_id": int, "message_id": int } }
 ticket_panels: dict = {}
+
+# 🎫 ТЕКСТ ПАНЕЛИ ТИКЕТОВ { guild_id: { "title": str, "desc": str, "image": str } }
+ticket_texts: dict = {}
 
 # 🎫 СЧЁТЧИК ТИКЕТОВ { guild_id: int }
 ticket_counters: dict = {}
@@ -383,6 +393,7 @@ def save_data():
         "guild_shop_items":     {str(g): v for g, v in guild_shop_items.items()},
         "event_command_roles":  {str(g): v for g, v in event_command_roles.items()},
         "private_vc_settings":  {str(g): v for g, v in private_vc_settings.items()},
+        "ticket_texts":         {str(g): v for g, v in ticket_texts.items()},
     }
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -436,6 +447,8 @@ def load_data():
             event_command_roles[int(g)] = v
         for g, v in data.get("private_vc_settings", {}).items():
             private_vc_settings[int(g)] = v
+        for g, v in data.get("ticket_texts", {}).items():
+            ticket_texts[int(g)] = v
         print("OK: Data loaded from data.json")
     except Exception as e:
         print(f"WARNING: Failed to load data: {e}")
@@ -1343,14 +1356,16 @@ async def create_inactive(ctx):
 async def slash_ticket(interaction: discord.Interaction, канал_панели: discord.TextChannel, категория: discord.CategoryChannel):
     if not is_admin(interaction):
         return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+    tt = ticket_texts.get(interaction.guild_id, {})
     embed = discord.Embed(
-        title=TICKET_TITLE,
-        description=TICKET_DESC,
+        title=tt.get("title", DEFAULT_TICKET_TITLE),
+        description=tt.get("desc", DEFAULT_TICKET_DESC),
         color=discord.Color.red(),
     )
-    if TICKET_IMAGE_URL:
-        embed.set_image(url=TICKET_IMAGE_URL)
-    embed.set_footer(text="DIAMOND", icon_url="https://i.imgur.com/nS7FHDR.png")
+    img = tt.get("image", DEFAULT_TICKET_IMAGE)
+    if img:
+        embed.set_image(url=img)
+    embed.set_footer(text="DIAMOND", icon_url=FOOTER_ICON)
 
     view = TicketPanelView(категория.id)
     msg  = await канал_панели.send(embed=embed, view=view)
@@ -1425,6 +1440,66 @@ async def slash_ticket_ping(interaction: discord.Interaction, роль: discord.
         f"✅ В тикетах будет тегаться: {роль.mention}",
         ephemeral=True,
     )
+
+
+class TicketTextModal(ui.Modal, title="✏️ Текст панели заявок"):
+    title_input = ui.TextInput(
+        label="Заголовок",
+        default="📋 Вступление в DIAMOND",
+        max_length=256,
+        required=True,
+    )
+    desc_input = ui.TextInput(
+        label="Описание",
+        style=discord.TextStyle.paragraph,
+        max_length=4000,
+        required=True,
+    )
+    image_input = ui.TextInput(
+        label="Ссылка на картинку (оставь пустым — без картинки)",
+        required=False,
+        placeholder="https://...",
+    )
+
+    def __init__(self, guild_id: int):
+        super().__init__()
+        tt = ticket_texts.get(guild_id, {})
+        self.title_input.default = tt.get("title", DEFAULT_TICKET_TITLE)
+        self.desc_input.default  = tt.get("desc",  DEFAULT_TICKET_DESC)
+        self.image_input.default = tt.get("image", DEFAULT_TICKET_IMAGE)
+        self._guild_id = guild_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        ticket_texts[self._guild_id] = {
+            "title": str(self.title_input),
+            "desc":  str(self.desc_input),
+            "image": str(self.image_input).strip(),
+        }
+        save_data()
+
+        # Обновить существующую панель если есть
+        panel = ticket_panels.get(self._guild_id, {})
+        if panel.get("message_id") and panel.get("panel_channel_id"):
+            try:
+                ch  = interaction.guild.get_channel(panel["panel_channel_id"])
+                msg = await ch.fetch_message(panel["message_id"])
+                tt  = ticket_texts[self._guild_id]
+                embed = discord.Embed(title=tt["title"], description=tt["desc"], color=discord.Color.red())
+                if tt["image"]:
+                    embed.set_image(url=tt["image"])
+                embed.set_footer(text="DIAMOND", icon_url=FOOTER_ICON)
+                await msg.edit(embed=embed)
+            except Exception:
+                pass
+
+        await interaction.response.send_message("✅ Текст панели обновлён!", ephemeral=True)
+
+
+@tree.command(name="тикет_текст", description="Изменить заголовок и текст панели заявок")
+async def slash_ticket_text(interaction: discord.Interaction):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+    await interaction.response.send_modal(TicketTextModal(interaction.guild_id))
 
 
 @tree.command(name="лог_отказов", description="Настроить канал для логов отклонённых заявок")

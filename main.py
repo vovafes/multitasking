@@ -59,6 +59,9 @@ points_db: dict = {}
 # { guild_id: { user_id: { "warns": int, "reason": str, "moderator": int } } }
 warns_db: dict = {}
 
+# { guild_id: { 1: role_id, 2: role_id, 3: role_id } }
+warn_roles: dict = {}
+
 # 🛒 ПАНЕЛЬ МАГАЗИНА
 # { guild_id: { "channel_id": int, "message_id": int } }
 shop_panels: dict = {}
@@ -258,11 +261,11 @@ def get_warns(guild_id: int, user_id: int) -> dict:
     return warns_db.get(guild_id, {}).get(user_id, None)
 
 
-def set_warn(guild_id: int, user_id: int, reason: str, moderator_id: int):
+def set_warn(guild_id: int, user_id: int, count: int, reason: str, moderator_id: int):
     if guild_id not in warns_db:
         warns_db[guild_id] = {}
     warns_db[guild_id][user_id] = {
-        "warns": warns_db[guild_id].get(user_id, {}).get("warns", 0) + 1,
+        "warns": count,
         "reason": reason,
         "moderator": moderator_id,
         "timestamp": datetime.now(),
@@ -334,6 +337,7 @@ def save_data():
         "ticket_manager_roles": {str(g): v for g, v in ticket_manager_roles.items()},
         "mp_roles":             {str(g): v for g, v in mp_roles.items()},
         "vzp_roles":            {str(g): v for g, v in vzp_roles.items()},
+        "warn_roles":           {str(g): {str(k): v for k, v in wr.items()} for g, wr in warn_roles.items()},
     }
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -373,6 +377,8 @@ def load_data():
             mp_roles[int(g)] = v
         for g, v in data.get("vzp_roles", {}).items():
             vzp_roles[int(g)] = v
+        for g, wr in data.get("warn_roles", {}).items():
+            warn_roles[int(g)] = {int(k): v for k, v in wr.items()}
         print("OK: Data loaded from data.json")
     except Exception as e:
         print(f"WARNING: Failed to load data: {e}")
@@ -1261,12 +1267,25 @@ async def remove_points_cmd(ctx, пользователь: discord.Member, ко�
 
 
 @bot.command(name="warn")
-async def warn_user(ctx, пользователь: discord.Member, *, причина: str):
+async def warn_user(ctx, пользователь: discord.Member, количество: int, *, причина: str):
     if not any(r.id == ADMIN_ROLE_ID for r in ctx.author.roles):
         return await ctx.message.delete()
-    """!warn @пользователь причина — выдать варн"""
-    set_warn(ctx.guild.id, пользователь.id, причина, ctx.author.id)
-    warns_count = get_warns(ctx.guild.id, пользователь.id)["warns"]
+    """!warn @пользователь <1-3> причина — выдать варн"""
+    if количество not in (1, 2, 3):
+        return await ctx.send("❌ Укажи количество варнов: 1, 2 или 3. Пример: `!warn @user 2 причина`", delete_after=6)
+
+    set_warn(ctx.guild.id, пользователь.id, количество, причина, ctx.author.id)
+
+    # Убрать все старые варн-роли и назначить новую
+    guild_warn_roles = warn_roles.get(ctx.guild.id, {})
+    roles_to_remove = [ctx.guild.get_role(rid) for rid in guild_warn_roles.values() if ctx.guild.get_role(rid)]
+    new_role = ctx.guild.get_role(guild_warn_roles.get(количество))
+    try:
+        await пользователь.remove_roles(*[r for r in roles_to_remove if r], reason="Обновление варн-роли")
+        if new_role:
+            await пользователь.add_roles(new_role, reason=f"Warn {количество}/3")
+    except Exception:
+        pass
 
     embed = discord.Embed(
         title="⚠️ WARN",
@@ -1276,14 +1295,16 @@ async def warn_user(ctx, пользователь: discord.Member, *, причи
     )
     embed.add_field(name="Причина", value=причина, inline=False)
     embed.add_field(name="Модератор", value=ctx.author.mention, inline=True)
-    embed.add_field(name="Всего warn'ов", value=f"**{warns_count}**", inline=True)
+    embed.add_field(name="Варны", value=f"**{количество}/3**", inline=True)
+    if new_role:
+        embed.add_field(name="Роль", value=new_role.mention, inline=True)
     embed.set_footer(text="DIAMOND", icon_url=FOOTER_ICON)
     await ctx.send(embed=embed)
 
     try:
         dm_embed = discord.Embed(
             title="⚠️ Вы получили warn",
-            description=f"**Причина:** {причина}",
+            description=f"**Причина:** {причина}\n**Варны:** {количество}/3",
             color=discord.Color.red(),
             timestamp=datetime.now(),
         )
@@ -1300,6 +1321,13 @@ async def admin_remove_warn(ctx, пользователь: discord.Member):
         return await ctx.message.delete()
     """!снять_варн @пользователь — снять варн"""
     if remove_warn(ctx.guild.id, пользователь.id):
+        # Убрать все варн-роли
+        guild_warn_roles = warn_roles.get(ctx.guild.id, {})
+        roles_to_remove = [ctx.guild.get_role(rid) for rid in guild_warn_roles.values() if ctx.guild.get_role(rid)]
+        try:
+            await пользователь.remove_roles(*[r for r in roles_to_remove if r], reason="Снятие варна")
+        except Exception:
+            pass
         embed = discord.Embed(
             title="✅ Warn снят",
             description=f"У {пользователь.mention} снят warn",
@@ -1310,6 +1338,56 @@ async def admin_remove_warn(ctx, пользователь: discord.Member):
         await ctx.send(embed=embed)
     else:
         await ctx.send("❌ У пользователя нет warn'ов!", delete_after=5)
+
+
+@bot.command(name="роль_варн")
+async def set_warn_role(ctx, номер: int, роль: discord.Role):
+    if not any(r.id == ADMIN_ROLE_ID for r in ctx.author.roles):
+        return await ctx.message.delete()
+    """!роль_варн <1-3> @роль — привязать роль к уровню варна"""
+    if номер not in (1, 2, 3):
+        return await ctx.send("❌ Укажи номер 1, 2 или 3. Пример: `!роль_варн 1 @Варн1/3`", delete_after=6)
+    if ctx.guild.id not in warn_roles:
+        warn_roles[ctx.guild.id] = {}
+    warn_roles[ctx.guild.id][номер] = роль.id
+    save_data()
+    embed = discord.Embed(
+        title="✅ Варн-роль настроена",
+        description=f"Варн **{номер}/3** → {роль.mention}",
+        color=discord.Color.green(),
+    )
+    embed.set_footer(text="DIAMOND", icon_url=FOOTER_ICON)
+    await ctx.send(embed=embed)
+    await ctx.message.delete()
+
+
+@bot.command(name="warnlist")
+async def warnlist(ctx):
+    if not any(r.id == ADMIN_ROLE_ID for r in ctx.author.roles):
+        return await ctx.message.delete()
+    """!warnlist — список всех участников с варнами"""
+    guild_warns = warns_db.get(ctx.guild.id, {})
+    active = {uid: d for uid, d in guild_warns.items() if d.get("warns", 0) > 0}
+
+    if not active:
+        return await ctx.send("✅ Ни у кого нет варнов!", delete_after=6)
+
+    lines = []
+    for i, (uid, d) in enumerate(active.items(), 1):
+        lines.append(
+            f"**{i}.** <@{uid}> — **{d['warns']}/3** варн(а)\n"
+            f"└ Причина: {d['reason']} | Модератор: <@{d['moderator']}>"
+        )
+
+    embed = discord.Embed(
+        title="⚠️ Список участников с варнами",
+        description="\n\n".join(lines),
+        color=discord.Color.red(),
+        timestamp=datetime.now(),
+    )
+    embed.set_footer(text=f"DIAMOND • Всего: {len(active)}", icon_url=FOOTER_ICON)
+    await ctx.send(embed=embed)
+    await ctx.message.delete()
 
 
 @bot.command(name="замена")

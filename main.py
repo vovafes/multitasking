@@ -655,10 +655,10 @@ class RejectModal(ui.Modal, title="❌ Причина отклонения"):
 
 class ApplicationModal(ui.Modal, title="📋 Подать заявку"):
     nickname = ui.TextInput(label="Ваш ник и статик в игре",  placeholder="Nick Name | 777",     required=True)
-    hours    = ui.TextInput(label="Кол-во часов в игре",       placeholder="2500",                required=True)
-    age      = ui.TextInput(label="Возраст",                   placeholder="18",                  required=True)
-    families = ui.TextInput(label="В каких семьях был?",       style=discord.TextStyle.paragraph, required=True)
-    recoil   = ui.TextInput(label="Откат со стрельбой",        placeholder="DM, Архив, YouTube",  required=True)
+    hours_age = ui.TextInput(label="Часов в игре / Возраст",  placeholder="2500 / 18",            required=True)
+    families  = ui.TextInput(label="В каких семьях был?",     style=discord.TextStyle.paragraph,  required=True)
+    recoil    = ui.TextInput(label="Откат со стрельбой",      placeholder="DM, Архив, YouTube",   required=True)
+    content   = ui.TextInput(label="Какой контент симпатизирует?", placeholder="РП / ВЗП",        required=True)
 
     def __init__(self, category_id: int):
         super().__init__()
@@ -714,14 +714,13 @@ class ApplicationModal(ui.Modal, title="📋 Подать заявку"):
             timestamp=datetime.now(),
         )
         embed.set_thumbnail(url=applicant.display_avatar.url)
-        embed.add_field(name="👤 Пользователь",      value=f"{applicant.mention} ({applicant})", inline=True)
-        embed.add_field(name="🎮 Ник | Статик",       value=str(self.nickname),  inline=True)
-        embed.add_field(name="\u200B",                value="\u200B",            inline=True)
-        embed.add_field(name="⏱️ Часов в игре",       value=str(self.hours),     inline=True)
-        embed.add_field(name="🎂 Возраст",            value=str(self.age),       inline=True)
-        embed.add_field(name="\u200B",                value="\u200B",            inline=True)
-        embed.add_field(name="🏠 Был в семьях",       value=str(self.families),  inline=False)
-        embed.add_field(name="🎯 Откат со стрельбой", value=str(self.recoil),    inline=False)
+        embed.add_field(name="👤 Пользователь",           value=f"{applicant.mention} ({applicant})", inline=True)
+        embed.add_field(name="🎮 Ник | Статик",            value=str(self.nickname),   inline=True)
+        embed.add_field(name="\u200B",                     value="\u200B",             inline=True)
+        embed.add_field(name="⏱️ Часов / Возраст",        value=str(self.hours_age),  inline=True)
+        embed.add_field(name="🎯 Откат со стрельбой",     value=str(self.recoil),     inline=True)
+        embed.add_field(name="🎮 Контент",                value=str(self.content),    inline=True)
+        embed.add_field(name="🏠 Был в семьях",           value=str(self.families),   inline=False)
         embed.set_footer(text=f"DIAMOND • {applicant.id}", icon_url=FOOTER_ICON)
 
         view = ApplicationReviewView(applicant.id)

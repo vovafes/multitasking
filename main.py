@@ -598,7 +598,7 @@ class ApplicationModal(ui.Modal, title="📋 Подать заявку"):
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             applicant: discord.PermissionOverwrite(
-                view_channel=True, send_messages=False, read_message_history=True
+                view_channel=True, send_messages=True, read_message_history=True
             ),
         }
         if admin_role:
@@ -1001,7 +1001,14 @@ async def реаки_cmd(ctx, количество: int = 10, *, названи�
     except Exception:
         pass
 
-    await _create_event_message(ctx.channel, ctx.guild, название, количество, image_file, image_ref)
+    event_role_id = event_roles.get(ctx.guild.id)
+    content = None
+    if event_role_id:
+        r = ctx.guild.get_role(event_role_id)
+        if r:
+            content = r.mention
+
+    await _create_event_message(ctx.channel, ctx.guild, название, количество, image_file, image_ref, content=content)
 
 
 @bot.command(name="афк")

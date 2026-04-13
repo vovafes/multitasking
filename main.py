@@ -1,10 +1,12 @@
 import discord
 from discord import app_commands, ui
-from discord.ext import commands
+from discord.ext import commands, tasks
 import os
 import io
 import json
 import asyncio
+import re
+import aiohttp
 from dotenv import load_dotenv
 from datetime import datetime
 
@@ -2346,6 +2348,100 @@ async def on_ready():
         type=discord.ActivityType.watching,
         name="DIAMOND Helper"
     ))
+    if not update_stats.is_running():
+        update_stats.start()
+
+
+# ─────────────────────────────────────────────
+# СТАТИСТИКА GTA5RP
+# ─────────────────────────────────────────────
+
+RAGEMP_API = "https://cdn.rage.mp/master/"
+
+# { guild_id: { "channel_id": int, "message_id": int } }
+stats_panels: dict = {}
+
+async def fetch_gta5rp_stats() -> tuple[list[tuple[str, int]], int] | None:
+    """Возвращает [(название, онлайн), ...] отсортированный по убыванию + общий онлайн."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(RAGEMP_API, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json(content_type=None)
+    except Exception:
+        return None
+
+    servers = []
+    for addr, info in data.items():
+        name_raw = info.get("name", "")
+        if "gta5rp.com" not in name_raw.lower() and "gta5rp.com" not in addr.lower():
+            continue
+        m = re.search(r"GTA5RP\.COM \| (.+?) \|", name_raw, re.IGNORECASE)
+        short_name = m.group(1).strip() if m else name_raw
+        players = info.get("players", 0)
+        servers.append((short_name, players))
+
+    if not servers:
+        return None
+
+    servers.sort(key=lambda x: x[1], reverse=True)
+    total = sum(p for _, p in servers)
+    return servers, total
+
+
+def build_stats_embed(servers: list[tuple[str, int]], total: int) -> discord.Embed:
+    embed = discord.Embed(
+        title="<:gta5rp:0> Статистика серверов GTA5RP",
+        description="**Актуальная статистика (Обновляется каждые 30 секунд)**\n",
+        color=0xf1c40f,
+        timestamp=datetime.now(),
+    )
+    lines = "\n".join(f"**{name}** — {players} игр." for name, players in servers)
+    embed.description += lines
+    embed.add_field(name="🌐 Общий онлайн", value=f"**{total:,}** игроков".replace(",", " "), inline=False)
+    embed.set_footer(text="rage.mp • GTA5RP.COM")
+    return embed
+
+
+@bot.tree.command(name="статистика", description="Показать онлайн серверов GTA5RP (авто-обновление)")
+async def stats_command(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    result = await fetch_gta5rp_stats()
+    if not result:
+        return await interaction.followup.send("❌ Не удалось получить данные.", ephemeral=True)
+
+    servers, total = result
+    embed = build_stats_embed(servers, total)
+    msg = await interaction.channel.send(embed=embed)
+
+    stats_panels[interaction.guild_id] = {
+        "channel_id": interaction.channel_id,
+        "message_id": msg.id,
+    }
+
+    await interaction.followup.send("✅ Панель создана, будет обновляться каждые 30 сек.", ephemeral=True)
+
+
+@tasks.loop(seconds=30)
+async def update_stats():
+    if not stats_panels:
+        return
+    result = await fetch_gta5rp_stats()
+    if not result:
+        return
+    servers, total = result
+    embed = build_stats_embed(servers, total)
+
+    for guild_id, panel in list(stats_panels.items()):
+        ch = bot.get_channel(panel["channel_id"])
+        if not ch:
+            continue
+        try:
+            msg = await ch.fetch_message(panel["message_id"])
+            await msg.edit(embed=embed)
+        except Exception:
+            stats_panels.pop(guild_id, None)
 
 
 bot.run(os.getenv("DISCORD_TOKEN"))

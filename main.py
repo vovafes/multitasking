@@ -1732,7 +1732,7 @@ async def warn_user(ctx, пользователь: discord.Member, количе�
         pass
 
 
-@bot.command(name="снять_варн")
+@bot.command(name="unwarn")
 async def admin_remove_warn(ctx, пользователь: discord.Member):
     if not is_admin_ctx(ctx):
         return await ctx.message.delete()

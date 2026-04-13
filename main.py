@@ -46,6 +46,12 @@ event_roles: dict = {}
 # { guild_id: { user_id: { "reason": str, "return_time": str, "since": datetime } } }
 afk_list: dict = {}
 
+# { guild_id: { "message_id": int, "channel_id": int } }
+inactive_panels: dict = {}
+
+# { guild_id: { user_id: { "reason": str, "return_date": str, "since": datetime } } }
+inactive_list: dict = {}
+
 # 💰 БАЛЛЫ И ШТРАФЫ
 # { guild_id: { user_id: int } }
 points_db: dict = {}
@@ -182,6 +188,30 @@ async def update_thread_list(message_id: int):
         await msg.edit(content=build_thread_list(data["title"], data["max"], data["slots"]))
     except Exception:
         pass
+
+
+def build_inactive_embed(guild_id: int) -> discord.Embed:
+    entries = list(inactive_list.get(guild_id, {}).items())
+    count   = len(entries)
+
+    if entries:
+        lines = "\n\n".join(
+            f"**{i+1})** <@{uid}> Причина: {d['reason']}\nВернусь: `{d['return_date']}`"
+            for i, (uid, d) in enumerate(entries)
+        )
+    else:
+        lines = "*Список пуст — никто не в инактиве*"
+
+    embed = discord.Embed(
+        title="📅 Люди, находящиеся в инактиве:",
+        description=f"• Всего в инактиве **{count}** {declension(count)}\n\n{lines}",
+        color=discord.Color.orange(),
+        timestamp=datetime.now(),
+    )
+    if AFK_IMAGE_URL:
+        embed.set_image(url=AFK_IMAGE_URL)
+    embed.set_footer(text="DIAMOND", icon_url=FOOTER_ICON)
+    return embed
 
 
 def build_afk_embed(guild_id: int) -> discord.Embed:
@@ -356,6 +386,18 @@ async def refresh_afk_message(guild: discord.Guild):
         channel = guild.get_channel(panel["channel_id"])
         msg     = await channel.fetch_message(panel["message_id"])
         await msg.edit(embed=build_afk_embed(guild.id))
+    except Exception:
+        pass
+
+
+async def refresh_inactive_message(guild: discord.Guild):
+    panel = inactive_panels.get(guild.id)
+    if not panel:
+        return
+    try:
+        channel = guild.get_channel(panel["channel_id"])
+        msg     = await channel.fetch_message(panel["message_id"])
+        await msg.edit(embed=build_inactive_embed(guild.id))
     except Exception:
         pass
 
@@ -675,6 +717,60 @@ class AfkView(ui.View):
         del afk_list[guild_id][user_id]
         await refresh_afk_message(interaction.guild)
         await interaction.response.send_message("✅ Вы убраны из АФК-списка. С возвращением!", ephemeral=True)
+
+
+class InactiveModal(ui.Modal, title="📅 Уход в инактив"):
+    reason      = ui.TextInput(label="Причина", placeholder="Отпуск / Работа / Дела...", required=True)
+    return_date = ui.TextInput(label="Вернусь (например 25.04.2026)", placeholder="25.04.2026", required=True)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guild_id = interaction.guild_id
+        user_id  = interaction.user.id
+
+        if guild_id not in inactive_list:
+            inactive_list[guild_id] = {}
+
+        inactive_list[guild_id][user_id] = {
+            "reason":      str(self.reason),
+            "return_date": str(self.return_date),
+            "since":       datetime.now(),
+        }
+
+        await refresh_inactive_message(interaction.guild)
+
+        embed = discord.Embed(
+            description=(
+                f"📅 Вы добавлены в список инактива\n"
+                f"**Причина:** {self.reason}\n"
+                f"**Вернусь:** `{self.return_date}`"
+            ),
+            color=discord.Color.orange(),
+        )
+        embed.set_footer(text="DIAMOND", icon_url=FOOTER_ICON)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class InactiveView(ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @ui.button(label="Ухожу в инактив", style=discord.ButtonStyle.secondary, emoji="📅", custom_id="inactive_away")
+    async def inactive_away(self, interaction: discord.Interaction, button: ui.Button):
+        guild_id = interaction.guild_id
+        if guild_id in inactive_list and interaction.user.id in inactive_list[guild_id]:
+            return await interaction.response.send_message("⚠️ Вы уже в списке инактива!", ephemeral=True)
+        await interaction.response.send_modal(InactiveModal())
+
+    @ui.button(label="Вернулся из инактива", style=discord.ButtonStyle.success, emoji="✅", custom_id="inactive_back")
+    async def inactive_back(self, interaction: discord.Interaction, button: ui.Button):
+        guild_id = interaction.guild_id
+        user_id  = interaction.user.id
+        if guild_id not in inactive_list or user_id not in inactive_list[guild_id]:
+            return await interaction.response.send_message("⚠️ Вас нет в списке инактива!", ephemeral=True)
+
+        del inactive_list[guild_id][user_id]
+        await refresh_inactive_message(interaction.guild)
+        await interaction.response.send_message("✅ Вы убраны из инактива. С возвращением!", ephemeral=True)
 
 
 class TicketPanelView(ui.View):
@@ -1027,6 +1123,22 @@ async def create_afk(ctx):
     await ctx.message.delete()
 
 
+@bot.command(name="инактив")
+async def create_inactive(ctx):
+    if not any(r.id == ADMIN_ROLE_ID for r in ctx.author.roles):
+        return await ctx.message.delete()
+    """!инактив — создать панель инактива в этом канале"""
+    guild_id = ctx.guild.id
+    if guild_id not in inactive_list:
+        inactive_list[guild_id] = {}
+
+    view  = InactiveView()
+    embed = build_inactive_embed(guild_id)
+    msg   = await ctx.send(embed=embed, view=view)
+    inactive_panels[guild_id] = {"message_id": msg.id, "channel_id": ctx.channel.id}
+    await ctx.message.delete()
+
+
 @tree.command(name="тикет", description="Создать панель заявок")
 @app_commands.describe(
     канал_панели="Канал, куда отправить кнопку заявки",
@@ -1287,6 +1399,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 async def on_ready():
     load_data()
     bot.add_view(AfkView())
+    bot.add_view(InactiveView())
     bot.add_view(ShopView())
     bot.add_view(ApplicationReviewView())
     for guild_id, panel in ticket_panels.items():

@@ -978,7 +978,7 @@ async def set_mp_role(ctx, роль: discord.Role):
 
 
 @bot.command(name="реаки")
-async def реаки_cmd(ctx, количество: int = 10, *, название: str = "Мероприятие"):
+async def реаки_cmd(ctx, количество: int = 10, *, название: str = "Реакции"):
     """!реаки [количество] [название] — сбор на мероприятие (от лица бота)"""
     if not any(r.id == ADMIN_ROLE_ID for r in ctx.author.roles):
         return await ctx.message.delete()

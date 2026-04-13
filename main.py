@@ -91,6 +91,9 @@ mp_roles: dict = {}
 # 🔫 РОЛЬ ВЗП { guild_id: role_id }
 vzp_roles: dict = {}
 
+# 🎯 РОЛИ ДОСТУПА К КОМАНДАМ СБОРОВ { guild_id: { "взп": [role_id,...], "мп": [...], "реаки": [...] } }
+event_command_roles: dict = {}
+
 # 🛒 ТОВАРЫ МАГАЗИНА per-guild
 # { guild_id: { item_id: { "name": str, "price": int, "emoji": str, "description": str,
 #               "action": "remove_warn"|"give_role"|"notify", "role_id": int|None } } }
@@ -119,6 +122,13 @@ def is_admin_ctx(ctx) -> bool:
     if admin_role_id:
         return any(r.id == admin_role_id for r in ctx.author.roles)
     return ctx.author.guild_permissions.administrator
+
+def can_run_event(ctx, event_type: str) -> bool:
+    """Проверка доступа к командам сборов (!взп, !мп, !реаки). Админ всегда может."""
+    if is_admin_ctx(ctx):
+        return True
+    allowed = event_command_roles.get(ctx.guild.id, {}).get(event_type, [])
+    return any(r.id in allowed for r in ctx.author.roles)
 
 def is_ticket_manager(interaction: discord.Interaction) -> bool:
     member = interaction.user
@@ -364,6 +374,7 @@ def save_data():
         "ticket_viewer_roles":  {str(g): v for g, v in ticket_viewer_roles.items()},
         "ticket_ping_role":     {str(g): v for g, v in ticket_ping_role.items()},
         "guild_shop_items":     {str(g): v for g, v in guild_shop_items.items()},
+        "event_command_roles":  {str(g): v for g, v in event_command_roles.items()},
     }
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -413,6 +424,8 @@ def load_data():
             ticket_ping_role[int(g)] = v
         for g, v in data.get("guild_shop_items", {}).items():
             guild_shop_items[int(g)] = v
+        for g, v in data.get("event_command_roles", {}).items():
+            event_command_roles[int(g)] = v
         print("OK: Data loaded from data.json")
     except Exception as e:
         print(f"WARNING: Failed to load data: {e}")
@@ -1090,7 +1103,7 @@ async def _create_event_message(channel, guild, title: str, max_count: int, imag
 @bot.command(name="взп")
 async def взп_cmd(ctx, количество: int = 10, *, название: str = "ВЗП"):
     """!взп [количество] [название] — сбор с фото (от лица бота)"""
-    if not is_admin_ctx(ctx):
+    if not can_run_event(ctx, "взп"):
         return await ctx.message.delete()
 
     image_file = None
@@ -1131,7 +1144,7 @@ async def взп_cmd(ctx, количество: int = 10, *, название: s
 @bot.command(name="мп")
 async def мп_cmd(ctx, количество: int = 10, *, название: str = "МП"):
     """!мп [количество] [название] — сбор МП"""
-    if not is_admin_ctx(ctx):
+    if not can_run_event(ctx, "мп"):
         return await ctx.message.delete()
 
     image_file = None
@@ -1196,10 +1209,60 @@ async def set_mp_role(ctx, роль: discord.Role):
     await ctx.message.delete()
 
 
+@tree.command(name="доступ_сбора", description="Добавить роль с доступом к команде сбора")
+@app_commands.describe(
+    тип="Тип сбора: взп, мп или реаки",
+    роль="Роль, которая получит доступ к команде"
+)
+@app_commands.choices(тип=[
+    app_commands.Choice(name="взп", value="взп"),
+    app_commands.Choice(name="мп", value="мп"),
+    app_commands.Choice(name="реаки", value="реаки"),
+])
+async def slash_event_access_add(interaction: discord.Interaction, тип: str, роль: discord.Role):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+    gid = interaction.guild_id
+    if gid not in event_command_roles:
+        event_command_roles[gid] = {}
+    if тип not in event_command_roles[gid]:
+        event_command_roles[gid][тип] = []
+    if роль.id not in event_command_roles[gid][тип]:
+        event_command_roles[gid][тип].append(роль.id)
+    save_data()
+    roles_list = ", ".join(f"<@&{rid}>" for rid in event_command_roles[gid][тип])
+    await interaction.response.send_message(
+        f"✅ {роль.mention} теперь может использовать `!{тип}`\nВсе роли с доступом: {roles_list}",
+        ephemeral=True,
+    )
+
+
+@tree.command(name="убрать_доступ_сбора", description="Убрать роль из доступа к команде сбора")
+@app_commands.describe(
+    тип="Тип сбора: взп, мп или реаки",
+    роль="Роль, которую убрать"
+)
+@app_commands.choices(тип=[
+    app_commands.Choice(name="взп", value="взп"),
+    app_commands.Choice(name="мп", value="мп"),
+    app_commands.Choice(name="реаки", value="реаки"),
+])
+async def slash_event_access_remove(interaction: discord.Interaction, тип: str, роль: discord.Role):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+    gid = interaction.guild_id
+    allowed = event_command_roles.get(gid, {}).get(тип, [])
+    if роль.id not in allowed:
+        return await interaction.response.send_message(f"❌ {роль.mention} и так не в списке для `!{тип}`.", ephemeral=True)
+    allowed.remove(роль.id)
+    save_data()
+    await interaction.response.send_message(f"✅ {роль.mention} убрана из доступа к `!{тип}`.", ephemeral=True)
+
+
 @bot.command(name="реаки")
 async def реаки_cmd(ctx, количество: int = 10, *, название: str = "Реакции"):
     """!реаки [количество] [название] — сбор на мероприятие (от лица бота)"""
-    if not is_admin_ctx(ctx):
+    if not can_run_event(ctx, "реаки"):
         return await ctx.message.delete()
 
     image_file = None
@@ -1798,6 +1861,19 @@ async def slash_settings(interaction: discord.Interaction):
         value=(
             f"АФК: {channel_str(afk_p.get('channel_id'))}\n"
             f"Инактив: {channel_str(inact_p.get('channel_id'))}"
+        ),
+        inline=False,
+    )
+    ecr = event_command_roles.get(gid, {})
+    def roles_list_str(type_key):
+        ids = ecr.get(type_key, [])
+        return ", ".join(f"<@&{rid}>" for rid in ids) if ids else "*только админ*"
+    embed.add_field(
+        name="🎯 Доступ к сборам",
+        value=(
+            f"`!взп`: {roles_list_str('взп')}\n"
+            f"`!мп`: {roles_list_str('мп')}\n"
+            f"`!реаки`: {roles_list_str('реаки')}"
         ),
         inline=False,
     )

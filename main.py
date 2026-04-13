@@ -76,8 +76,14 @@ ticket_counters: dict = {}
 # 📋 КАНАЛ ЛОГОВ ОТКАЗОВ { guild_id: channel_id }
 reject_log_channels: dict = {}
 
-# 🎫 РОЛЬ ТИКЕТ-МЕНЕДЖЕРА { guild_id: role_id }
+# 🎫 РОЛЬ ТИКЕТ-МЕНЕДЖЕРА (может одобрять/отклонять) { guild_id: role_id }
 ticket_manager_roles: dict = {}
+
+# 🎫 РОЛИ С ДОСТУПОМ К ТИКЕТУ (видят канал) { guild_id: [role_id, ...] }
+ticket_viewer_roles: dict = {}
+
+# 🎫 РОЛЬ ДЛЯ ТЕГА В ТИКЕТЕ { guild_id: role_id }
+ticket_ping_role: dict = {}
 
 # 🏎 РОЛЬ МП { guild_id: role_id }
 mp_roles: dict = {}
@@ -351,6 +357,8 @@ def save_data():
         "vzp_roles":            {str(g): v for g, v in vzp_roles.items()},
         "warn_roles":           {str(g): {str(k): v for k, v in wr.items()} for g, wr in warn_roles.items()},
         "admin_roles":          {str(g): v for g, v in admin_roles.items()},
+        "ticket_viewer_roles":  {str(g): v for g, v in ticket_viewer_roles.items()},
+        "ticket_ping_role":     {str(g): v for g, v in ticket_ping_role.items()},
     }
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -394,6 +402,10 @@ def load_data():
             warn_roles[int(g)] = {int(k): v for k, v in wr.items()}
         for g, v in data.get("admin_roles", {}).items():
             admin_roles[int(g)] = v
+        for g, v in data.get("ticket_viewer_roles", {}).items():
+            ticket_viewer_roles[int(g)] = v
+        for g, v in data.get("ticket_ping_role", {}).items():
+            ticket_ping_role[int(g)] = v
         print("OK: Data loaded from data.json")
     except Exception as e:
         print(f"WARNING: Failed to load data: {e}")
@@ -650,9 +662,11 @@ class ApplicationModal(ui.Modal, title="📋 Подать заявку"):
         applicant  = interaction.user
         category   = guild.get_channel(self.category_id)
         admin_role_id = admin_roles.get(guild.id)
-        admin_role   = guild.get_role(admin_role_id) if admin_role_id else None
-        tm_role_id   = ticket_manager_roles.get(guild.id)
-        tm_role      = guild.get_role(tm_role_id) if tm_role_id else None
+        admin_role    = guild.get_role(admin_role_id) if admin_role_id else None
+        tm_role_id    = ticket_manager_roles.get(guild.id)
+        tm_role       = guild.get_role(tm_role_id) if tm_role_id else None
+        ping_role_id  = ticket_ping_role.get(guild.id)
+        ping_role     = guild.get_role(ping_role_id) if ping_role_id else tm_role
 
         ticket_counters[guild.id] = ticket_counters.get(guild.id, 0) + 1
         ticket_num = ticket_counters[guild.id]
@@ -669,6 +683,11 @@ class ApplicationModal(ui.Modal, title="📋 Подать заявку"):
             overwrites[admin_role] = ticket_perms
         if tm_role:
             overwrites[tm_role] = ticket_perms
+        # Роли с доступом на просмотр
+        for rid in ticket_viewer_roles.get(guild.id, []):
+            r = guild.get_role(rid)
+            if r:
+                overwrites[r] = ticket_perms
 
         try:
             ticket_channel = await guild.create_text_channel(
@@ -699,7 +718,7 @@ class ApplicationModal(ui.Modal, title="📋 Подать заявку"):
         embed.set_footer(text=f"DIAMOND • {applicant.id}", icon_url=FOOTER_ICON)
 
         view = ApplicationReviewView(applicant.id)
-        pings = tm_role.mention if tm_role else None
+        pings = ping_role.mention if ping_role else None
         await ticket_channel.send(content=pings, embed=embed, view=view)
 
         sent_embed = discord.Embed(
@@ -1207,6 +1226,52 @@ async def slash_ticket_manager(interaction: discord.Interaction, роль: disco
     )
 
 
+@tree.command(name="тикет_доступ", description="Добавить роль с доступом к тикетам (видит канал)")
+@app_commands.describe(роль="Роль, которая будет видеть канал тикета")
+async def slash_ticket_viewer_add(interaction: discord.Interaction, роль: discord.Role):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+    gid = interaction.guild_id
+    if gid not in ticket_viewer_roles:
+        ticket_viewer_roles[gid] = []
+    if роль.id not in ticket_viewer_roles[gid]:
+        ticket_viewer_roles[gid].append(роль.id)
+    save_data()
+    roles_list = ", ".join(f"<@&{rid}>" for rid in ticket_viewer_roles[gid])
+    await interaction.response.send_message(
+        f"✅ {роль.mention} добавлена к тикетам.\nВсе роли с доступом: {roles_list}",
+        ephemeral=True,
+    )
+
+
+@tree.command(name="тикет_доступ_убрать", description="Убрать роль из доступа к тикетам")
+@app_commands.describe(роль="Роль, которую нужно убрать")
+async def slash_ticket_viewer_remove(interaction: discord.Interaction, роль: discord.Role):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+    gid = interaction.guild_id
+    viewers = ticket_viewer_roles.get(gid, [])
+    if роль.id not in viewers:
+        return await interaction.response.send_message(f"❌ {роль.mention} и так не в списке доступа.", ephemeral=True)
+    viewers.remove(роль.id)
+    ticket_viewer_roles[gid] = viewers
+    save_data()
+    await interaction.response.send_message(f"✅ {роль.mention} убрана из доступа к тикетам.", ephemeral=True)
+
+
+@tree.command(name="тикет_пинг", description="Роль, которая тегается в сообщении тикета")
+@app_commands.describe(роль="Роль для тега (если не задана — тегается тикет-менеджер)")
+async def slash_ticket_ping(interaction: discord.Interaction, роль: discord.Role):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+    ticket_ping_role[interaction.guild_id] = роль.id
+    save_data()
+    await interaction.response.send_message(
+        f"✅ В тикетах будет тегаться: {роль.mention}",
+        ephemeral=True,
+    )
+
+
 @tree.command(name="лог_отказов", description="Настроить канал для логов отклонённых заявок")
 @app_commands.describe(канал="Канал, куда будут дублироваться отказы")
 async def slash_reject_log(interaction: discord.Interaction, канал: discord.TextChannel):
@@ -1529,10 +1594,15 @@ async def slash_settings(interaction: discord.Interaction):
         ),
         inline=False,
     )
+    viewers = ticket_viewer_roles.get(gid, [])
+    viewers_str = ", ".join(f"<@&{rid}>" for rid in viewers) if viewers else "⚠️ *не заданы*"
     embed.add_field(
         name="📋 Тикеты",
         value=(
             f"Канал панели: {channel_str(tp.get('panel_channel_id'))}\n"
+            f"Тикет-менеджер: {role_str(ticket_manager_roles.get(gid))}\n"
+            f"Роль для тега: {role_str(ticket_ping_role.get(gid))}\n"
+            f"Роли с доступом: {viewers_str}\n"
             f"Лог отказов: {channel_str(reject_log_channels.get(gid))}\n"
             f"Счётчик тикетов: **{ticket_counters.get(gid, 0)}**"
         ),

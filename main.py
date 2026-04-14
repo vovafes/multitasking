@@ -2447,8 +2447,7 @@ async def on_ready():
     bot.add_view(PrivateVCView())
     bot.add_view(ApplicationReviewView())
     bot.add_view(ContractPanelView())
-    for mid in list(active_contracts.keys()):
-        bot.add_view(ActiveContractView(mid))
+    bot.add_view(ActiveContractView(0))
     bot.add_view(FeedbackPanelView())
     for guild_id in guild_shop_items:
         bot.add_view(ShopView(guild_id))
@@ -2646,16 +2645,12 @@ class ContractModal(ui.Modal, title="📄 Взять контракт"):
         }
 
         embed = build_active_contract_embed(contract_data)
-        view  = ActiveContractView(0)  # message_id обновим после отправки
+        view  = ActiveContractView(0)
         msg   = await interaction.channel.send(content=content, embed=embed, view=view)
 
         contract_data["message_id"] = msg.id
         active_contracts[msg.id]    = contract_data
         save_data()
-
-        # Переназначаем view с правильным message_id
-        view2 = ActiveContractView(msg.id)
-        await msg.edit(view=view2)
 
         await interaction.response.send_message("✅ Контракт создан!", ephemeral=True)
 

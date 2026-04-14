@@ -2438,8 +2438,17 @@ RAGEMP_API = "https://cdn.rage.mp/master/"
 # { guild_id: { "channel_id": int, "message_id": int } }
 stats_panels: dict = {}
 
+SERVER_ORDER = [
+    "Downtown", "Strawberry", "VineWood", "Blackberry", "Insquad",
+    "Sunrise", "Rainbow", "Richman", "Eclipse", "La Mesa", "Burton",
+    "Rockford", "Alta", "Del Perro", "Davis", "Harmony", "Redwood",
+    "Hawick", "Grapeseed", "Murrieta", "Vespucci", "Milton", "La Puerta",
+]
+_SERVER_ORDER_LOWER = {name.lower(): i for i, name in enumerate(SERVER_ORDER)}
+
+
 async def fetch_gta5rp_stats() -> tuple[list[tuple[str, int]], int] | None:
-    """Возвращает [(название, онлайн), ...] отсортированный по убыванию + общий онлайн."""
+    """Возвращает [(название, онлайн), ...] в порядке SERVER_ORDER + общий онлайн."""
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(RAGEMP_API, timeout=aiohttp.ClientTimeout(total=10)) as resp:
@@ -2462,7 +2471,7 @@ async def fetch_gta5rp_stats() -> tuple[list[tuple[str, int]], int] | None:
     if not servers:
         return None
 
-    servers.sort(key=lambda x: x[1], reverse=True)
+    servers.sort(key=lambda x: _SERVER_ORDER_LOWER.get(x[0].lower(), 9999))
     total = sum(p for _, p in servers)
     return servers, total
 

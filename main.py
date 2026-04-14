@@ -369,7 +369,7 @@ def build_shop_embed(guild_id: int) -> discord.Embed:
 
 
 def save_data():
-    """Сохраняет баллы, варны и роли на диск."""
+    """Сохраняет все данные на диск."""
     warns_serial = {}
     for g, users in warns_db.items():
         warns_serial[str(g)] = {}
@@ -378,6 +378,32 @@ def save_data():
                 k: (v.isoformat() if isinstance(v, datetime) else v)
                 for k, v in info.items()
             }
+
+    afk_list_serial = {}
+    for g, users in afk_list.items():
+        afk_list_serial[str(g)] = {}
+        for u, info in users.items():
+            afk_list_serial[str(g)][str(u)] = {
+                k: (v.isoformat() if isinstance(v, datetime) else v)
+                for k, v in info.items()
+            }
+
+    inactive_list_serial = {}
+    for g, users in inactive_list.items():
+        inactive_list_serial[str(g)] = {}
+        for u, info in users.items():
+            inactive_list_serial[str(g)][str(u)] = {
+                k: (v.isoformat() if isinstance(v, datetime) else v)
+                for k, v in info.items()
+            }
+
+    event_lists_serial = {}
+    for mid, ev in event_lists.items():
+        event_lists_serial[str(mid)] = {
+            **{k: v for k, v in ev.items() if k != "slots"},
+            "slots": {str(s): uid for s, uid in ev.get("slots", {}).items()},
+        }
+
     data = {
         "points":        {str(g): {str(u): v for u, v in us.items()} for g, us in points_db.items()},
         "warns":         warns_serial,
@@ -396,6 +422,12 @@ def save_data():
         "event_command_roles":  {str(g): v for g, v in event_command_roles.items()},
         "private_vc_settings":  {str(g): v for g, v in private_vc_settings.items()},
         "ticket_texts":         {str(g): v for g, v in ticket_texts.items()},
+        "afk_list":             afk_list_serial,
+        "afk_panels":           {str(g): v for g, v in afk_panels.items()},
+        "inactive_list":        inactive_list_serial,
+        "inactive_panels":      {str(g): v for g, v in inactive_panels.items()},
+        "event_lists":          event_lists_serial,
+        "shop_panels":          {str(g): v for g, v in shop_panels.items()},
     }
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -451,6 +483,40 @@ def load_data():
             private_vc_settings[int(g)] = v
         for g, v in data.get("ticket_texts", {}).items():
             ticket_texts[int(g)] = v
+
+        # АФК
+        for g, users in data.get("afk_list", {}).items():
+            afk_list[int(g)] = {}
+            for u, info in users.items():
+                afk_list[int(g)][int(u)] = {
+                    k: (datetime.fromisoformat(v) if k == "since" and v else v)
+                    for k, v in info.items()
+                }
+        for g, v in data.get("afk_panels", {}).items():
+            afk_panels[int(g)] = v
+
+        # Инактив
+        for g, users in data.get("inactive_list", {}).items():
+            inactive_list[int(g)] = {}
+            for u, info in users.items():
+                inactive_list[int(g)][int(u)] = {
+                    k: (datetime.fromisoformat(v) if k == "since" and v else v)
+                    for k, v in info.items()
+                }
+        for g, v in data.get("inactive_panels", {}).items():
+            inactive_panels[int(g)] = v
+
+        # Сборы
+        for mid, ev in data.get("event_lists", {}).items():
+            event_lists[int(mid)] = {
+                **{k: v for k, v in ev.items() if k != "slots"},
+                "slots": {int(s): uid for s, uid in ev.get("slots", {}).items()},
+            }
+
+        # Панель магазина
+        for g, v in data.get("shop_panels", {}).items():
+            shop_panels[int(g)] = v
+
         print("OK: Data loaded from data.json")
     except Exception as e:
         print(f"WARNING: Failed to load data: {e}")
@@ -518,6 +584,7 @@ class SlotButton(ui.Button):
             slots[self.slot_num] = user_id
             msg_text = f"✅ Вы заняли слот **{self.slot_num}**!"
 
+        save_data()
         new_view = EventView(self.message_id)
         embed    = build_event_embed(data["title"], data["max"], slots, data.get("image_url"), data.get("note"))
         await interaction.response.defer()
@@ -564,6 +631,7 @@ class JoinButton(ui.Button):
         for slot_num, uid in slots.items():
             if uid == user_id:
                 slots[slot_num] = None
+                save_data()
                 embed = build_event_embed(data["title"], data["max"], slots, data.get("image_url"), data.get("note"), join_mode=True)
                 await interaction.response.defer()
                 await interaction.message.edit(embed=embed)
@@ -575,6 +643,7 @@ class JoinButton(ui.Button):
         for i in range(1, data["max"] + 1):
             if slots.get(i) is None:
                 slots[i] = user_id
+                save_data()
                 embed = build_event_embed(data["title"], data["max"], slots, data.get("image_url"), data.get("note"), join_mode=True)
                 await interaction.response.defer()
                 await interaction.message.edit(embed=embed)
@@ -612,6 +681,7 @@ class AfkModal(ui.Modal, title="🕐 Уход в АФК"):
             "return_time": str(self.return_time),
             "since":       datetime.now(),
         }
+        save_data()
 
         await refresh_afk_message(interaction.guild)
 
@@ -800,6 +870,7 @@ class AfkView(ui.View):
             return await interaction.response.send_message("⚠️ Вас нет в АФК-списке!", ephemeral=True)
 
         del afk_list[guild_id][user_id]
+        save_data()
         await refresh_afk_message(interaction.guild)
         await interaction.response.send_message("✅ Вы убраны из АФК-списка. С возвращением!", ephemeral=True)
 
@@ -820,6 +891,7 @@ class InactiveModal(ui.Modal, title="📅 Уход в инактив"):
             "return_date": str(self.return_date),
             "since":       datetime.now(),
         }
+        save_data()
 
         await refresh_inactive_message(interaction.guild)
 
@@ -854,6 +926,7 @@ class InactiveView(ui.View):
             return await interaction.response.send_message("⚠️ Вас нет в списке инактива!", ephemeral=True)
 
         del inactive_list[guild_id][user_id]
+        save_data()
         await refresh_inactive_message(interaction.guild)
         await interaction.response.send_message("✅ Вы убраны из инактива. С возвращением!", ephemeral=True)
 
@@ -1120,6 +1193,7 @@ async def _create_event_message(channel, guild, title: str, max_count: int, imag
         event_lists[msg.id]["thread_msg_id"] = list_msg.id
     except Exception:
         pass
+    save_data()
 
 
 # ─────────────────────────────────────────────
@@ -1331,6 +1405,7 @@ async def create_afk(ctx):
     embed = build_afk_embed(guild_id)
     msg   = await ctx.send(embed=embed, view=view)
     afk_panels[guild_id] = {"message_id": msg.id, "channel_id": ctx.channel.id}
+    save_data()
     await ctx.message.delete()
 
 
@@ -1347,6 +1422,7 @@ async def create_inactive(ctx):
     embed = build_inactive_embed(guild_id)
     msg   = await ctx.send(embed=embed, view=view)
     inactive_panels[guild_id] = {"message_id": msg.id, "channel_id": ctx.channel.id}
+    save_data()
     await ctx.message.delete()
 
 
@@ -1538,6 +1614,7 @@ async def slash_shop(interaction: discord.Interaction):
     view  = ShopView(gid)
     msg   = await interaction.channel.send(embed=embed, view=view)
     shop_panels[gid] = {"channel_id": interaction.channel_id, "message_id": msg.id}
+    save_data()
     await interaction.response.send_message("✅ Панель магазина развёрнута!", ephemeral=True)
 
 

@@ -160,7 +160,7 @@
 | `/статистика` | Показать онлайн всех серверов GTA5RP в текущем канале |
 
 - Эмбед автоматически обновляется каждые **30 секунд**
-- Серверы отсортированы по убыванию онлайна
+- Серверы отсортированы в фиксированном порядке: Downtown, Strawberry, VineWood, Blackberry, Insquad, Sunrise, Rainbow, Richman, Eclipse, La Mesa, Burton, Rockford, Alta, Del Perro, Davis, Harmony, Redwood, Hawick, Grapeseed, Murrieta, Vespucci, Milton, La Puerta
 - Внизу показывается общий онлайн по проекту
 - Данные берутся из публичного RageMP API
 

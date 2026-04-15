@@ -813,10 +813,11 @@ class AfkModal(ui.Modal, title="🕐 Уход в АФК"):
 class RejectModal(ui.Modal, title="❌ Причина отклонения"):
     reason = ui.TextInput(label="Укажите причину", style=discord.TextStyle.paragraph, required=True)
 
-    def __init__(self, applicant_id: int, original_message: discord.Message):
+    def __init__(self, applicant_id: int, original_message: discord.Message, channel: discord.TextChannel):
         super().__init__()
         self.applicant_id     = applicant_id
         self.original_message = original_message
+        self.channel          = channel
 
     async def on_submit(self, interaction: discord.Interaction):
         reason = str(self.reason)
@@ -869,7 +870,7 @@ class RejectModal(ui.Modal, title="❌ Причина отклонения"):
         )
         await asyncio.sleep(10)
         try:
-            await interaction.channel.delete(reason="Заявка отклонена")
+            await self.channel.delete(reason="Заявка отклонена")
         except Exception:
             pass
 
@@ -1073,6 +1074,7 @@ class ApplicationReviewView(ui.View):
         if not is_ticket_manager(interaction):
             return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
 
+        channel = interaction.channel
         await interaction.response.defer(ephemeral=True)
 
         applicant_id = self._get_applicant_id(interaction.message)
@@ -1130,7 +1132,7 @@ class ApplicationReviewView(ui.View):
         )
         await asyncio.sleep(10)
         try:
-            await interaction.channel.delete(reason="Заявка одобрена")
+            await channel.delete(reason="Заявка одобрена")
         except Exception:
             pass
 
@@ -1139,7 +1141,7 @@ class ApplicationReviewView(ui.View):
         if not is_ticket_manager(interaction):
             return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
         applicant_id = self._get_applicant_id(interaction.message)
-        await interaction.response.send_modal(RejectModal(applicant_id, interaction.message))
+        await interaction.response.send_modal(RejectModal(applicant_id, interaction.message, interaction.channel))
 
 
 # ─────────────────────────────────────────────

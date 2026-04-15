@@ -1073,6 +1073,8 @@ class ApplicationReviewView(ui.View):
         if not is_ticket_manager(interaction):
             return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
 
+        await interaction.response.defer(ephemeral=True)
+
         applicant_id = self._get_applicant_id(interaction.message)
 
         old_embed = interaction.message.embeds[0]
@@ -1107,7 +1109,7 @@ class ApplicationReviewView(ui.View):
 
         log_channel_id = reject_log_channels.get(interaction.guild_id)
         if log_channel_id:
-            log_channel = interaction.guild.get_channel(log_channel_id)
+            log_channel = interaction.client.get_channel(log_channel_id)
             if log_channel:
                 try:
                     log_embed = discord.Embed(
@@ -1123,7 +1125,7 @@ class ApplicationReviewView(ui.View):
                 except Exception:
                     pass
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "✅ Заявка одобрена. Канал закроется через 10 секунд.", ephemeral=True
         )
         await asyncio.sleep(10)
@@ -1744,7 +1746,7 @@ async def slash_ticket_text(interaction: discord.Interaction):
     await interaction.response.send_modal(TicketTextModal(interaction.guild_id))
 
 
-@tree.command(name="лог_отказов", description="Настроить канал для логов отклонённых заявок")
+@tree.command(name="лог_отказов", description="Настроить канал для логов одобрений и отказов по заявкам")
 @app_commands.describe(канал="Канал, куда будут дублироваться отказы")
 async def slash_reject_log(interaction: discord.Interaction, канал: discord.TextChannel):
     if not is_admin(interaction):
@@ -3359,7 +3361,7 @@ async def fetch_gta5rp_stats() -> tuple[list[tuple[str, int]], int] | None:
 
 def build_stats_embed(servers: list[tuple[str, int]], total: int) -> discord.Embed:
     embed = discord.Embed(
-        title="<:gta5rp:0> Статистика серверов GTA5RP",
+        title="Статистика серверов GTA5RP",
         description="**Актуальная статистика (Обновляется каждые 30 секунд)**\n",
         color=0xf1c40f,
         timestamp=datetime.now(),

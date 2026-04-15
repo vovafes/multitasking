@@ -148,6 +148,23 @@ feedback_settings: dict = {}
 # { guild_id: { "categories": [cat_id, ...], "excluded_channels": [ch_id, ...], "amount": int } }
 voice_reward_settings: dict = {}
 
+# 🪪 ЛИЧНЫЙ КАБИНЕТ
+# { guild_id: { "channel_id": int, "message_id": int, "text": str|None, "image_url": str|None } }
+cabinet_panels: dict = {}
+
+# { guild_id: str }  — пригласительная ссылка
+cabinet_invite_links: dict = {}
+
+# 📊 СТАТИСТИКА УЧАСТНИКОВ
+# { guild_id: { user_id: int } }
+message_counts: dict = {}
+
+# { guild_id: { user_id: int } }  — накопленные минуты в войсе
+voice_minutes: dict = {}
+
+# { guild_id: { user_id: datetime } }  — время входа в канал (in-memory, не сохраняется)
+voice_join_times: dict = {}
+
 # 💰 ОБЩАК
 # { guild_id: { "channel_id": int, "message_id": int, "text": str|None, "image_url": str|None } }
 obshak_panels: dict = {}
@@ -480,6 +497,10 @@ def save_data():
         "obshak_log_channels":  {str(g): v for g, v in obshak_log_channels.items()},
         "obshak_deposits":      {str(g): v for g, v in obshak_deposits.items()},
         "voice_reward_settings": {str(g): v for g, v in voice_reward_settings.items()},
+        "cabinet_panels":        {str(g): v for g, v in cabinet_panels.items()},
+        "cabinet_invite_links":  {str(g): v for g, v in cabinet_invite_links.items()},
+        "message_counts":        {str(g): {str(u): v for u, v in us.items()} for g, us in message_counts.items()},
+        "voice_minutes":         {str(g): {str(u): v for u, v in us.items()} for g, us in voice_minutes.items()},
     }
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -588,6 +609,18 @@ def load_data():
         # Голосовые каналы — начисление
         for g, v in data.get("voice_reward_settings", {}).items():
             voice_reward_settings[int(g)] = v
+
+        # Личный кабинет
+        for g, v in data.get("cabinet_panels", {}).items():
+            cabinet_panels[int(g)] = v
+        for g, v in data.get("cabinet_invite_links", {}).items():
+            cabinet_invite_links[int(g)] = v
+
+        # Статистика
+        for g, us in data.get("message_counts", {}).items():
+            message_counts[int(g)] = {int(u): v for u, v in us.items()}
+        for g, us in data.get("voice_minutes", {}).items():
+            voice_minutes[int(g)] = {int(u): v for u, v in us.items()}
 
         # Общак
         for g, v in data.get("obshak_panels", {}).items():
@@ -2421,6 +2454,30 @@ class PrivateVCView(ui.View):
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    # ── Трекинг минут в войсе ──
+    if not member.bot:
+        gid = member.guild.id
+        uid = member.id
+        now = datetime.now()
+
+        # Вышел из канала или сменил канал
+        if before.channel is not None:
+            join_time = voice_join_times.get(gid, {}).get(uid)
+            if join_time:
+                minutes = int((now - join_time).total_seconds() // 60)
+                if minutes > 0:
+                    if gid not in voice_minutes:
+                        voice_minutes[gid] = {}
+                    voice_minutes[gid][uid] = voice_minutes[gid].get(uid, 0) + minutes
+                voice_join_times.get(gid, {}).pop(uid, None)
+
+        # Зашёл в новый канал
+        if after.channel is not None:
+            if gid not in voice_join_times:
+                voice_join_times[gid] = {}
+            voice_join_times[gid][uid] = now
+
+    # ── Приватные комнаты ──
     settings = private_vc_settings.get(member.guild.id)
     if not settings:
         return
@@ -2487,6 +2544,19 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 
 
 @bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot or not message.guild:
+        await bot.process_commands(message)
+        return
+    gid = message.guild.id
+    uid = message.author.id
+    if gid not in message_counts:
+        message_counts[gid] = {}
+    message_counts[gid][uid] = message_counts[gid].get(uid, 0) + 1
+    await bot.process_commands(message)
+
+
+@bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
         await ctx.message.delete(delay=0)
@@ -2550,6 +2620,7 @@ async def on_ready():
     bot.add_view(ActiveContractView(0))
     bot.add_view(FeedbackPanelView())
     bot.add_view(ObshakView())
+    bot.add_view(PersonalCabinetView())
     for guild_id in guild_shop_items:
         bot.add_view(ShopView(guild_id))
     for guild_id, panel in ticket_panels.items():
@@ -3121,6 +3192,202 @@ async def feedback_photo_cmd(ctx, url: str):
         await ctx.message.delete()
     except Exception:
         pass
+
+
+# ─────────────────────────────────────────────
+# ЛИЧНЫЙ КАБИНЕТ
+# ─────────────────────────────────────────────
+
+DEFAULT_CABINET_TEXT = "Здесь ты можешь посмотреть свою статистику, баланс и оставить предложение."
+
+
+def build_cabinet_embed(guild_id: int) -> discord.Embed:
+    settings  = cabinet_panels.get(guild_id, {})
+    text      = settings.get("text") or DEFAULT_CABINET_TEXT
+    image_url = settings.get("image_url")
+
+    embed = discord.Embed(
+        title="🪪 Личный кабинет",
+        description=text,
+        color=0x2b2d31,
+    )
+    if image_url:
+        embed.set_image(url=image_url)
+    embed.set_footer(text="DIAMOND", icon_url=FOOTER_ICON)
+    return embed
+
+
+async def _refresh_cabinet_panel(guild: discord.Guild):
+    settings = cabinet_panels.get(guild.id)
+    if not settings or not settings.get("message_id"):
+        return
+    try:
+        ch  = guild.get_channel(settings["channel_id"])
+        msg = await ch.fetch_message(settings["message_id"])
+        await msg.edit(embed=build_cabinet_embed(guild.id), view=PersonalCabinetView())
+    except Exception:
+        pass
+
+
+class PersonalCabinetView(ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    # ── Ряд 1 ──
+
+    @ui.button(label="Баланс", emoji="💎", style=discord.ButtonStyle.secondary, custom_id="cabinet_balance", row=0)
+    async def btn_balance(self, interaction: discord.Interaction, button: ui.Button):
+        pts = get_points(interaction.guild_id, interaction.user.id)
+        embed = discord.Embed(
+            title="💎 Твой баланс",
+            description=f"**{pts:,}** 💎".replace(",", "."),
+            color=0x2b2d31,
+            timestamp=datetime.now(),
+        )
+        embed.set_footer(text="DIAMOND", icon_url=FOOTER_ICON)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @ui.button(label="Варны", emoji="⚠️", style=discord.ButtonStyle.secondary, custom_id="cabinet_warns", row=0)
+    async def btn_warns(self, interaction: discord.Interaction, button: ui.Button):
+        warn_data = get_warns(interaction.guild_id, interaction.user.id)
+        if not warn_data:
+            embed = discord.Embed(
+                title="✅ Варны",
+                description="У тебя нет варнов.",
+                color=discord.Color.green(),
+                timestamp=datetime.now(),
+            )
+        else:
+            embed = discord.Embed(
+                title="⚠️ Варны",
+                color=discord.Color.orange(),
+                timestamp=datetime.now(),
+            )
+            embed.add_field(name="Количество", value=f"{warn_data['warns']}/3", inline=True)
+            embed.add_field(name="Причина", value=warn_data.get("reason", "—"), inline=True)
+        embed.set_footer(text="DIAMOND", icon_url=FOOTER_ICON)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @ui.button(label="Фидбек", emoji="💬", style=discord.ButtonStyle.danger, custom_id="cabinet_feedback", row=0)
+    async def btn_feedback(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_modal(FeedbackModal())
+
+    # ── Ряд 2 ──
+
+    @ui.button(label="Статистика", style=discord.ButtonStyle.secondary, custom_id="cabinet_stats", row=1)
+    async def btn_stats(self, interaction: discord.Interaction, button: ui.Button):
+        member   = interaction.user
+        gid, uid = interaction.guild_id, member.id
+
+        msgs    = message_counts.get(gid, {}).get(uid, 0)
+        v_mins  = voice_minutes.get(gid, {}).get(uid, 0)
+        # Добавляем текущую сессию если сейчас в войсе
+        join_t = voice_join_times.get(gid, {}).get(uid)
+        if join_t:
+            v_mins += int((datetime.now() - join_t).total_seconds() // 60)
+
+        joined = member.joined_at.strftime("%d.%m.%Y") if member.joined_at else "—"
+
+        embed = discord.Embed(
+            title="📊 Статистика",
+            color=0x2b2d31,
+            timestamp=datetime.now(),
+        )
+        embed.add_field(name="👤 Имя", value=str(member.display_name), inline=True)
+        embed.add_field(name="🆔 User ID", value=str(uid), inline=True)
+        embed.add_field(name="📅 Вступил", value=joined, inline=True)
+        embed.add_field(name="💬 Сообщений", value=str(msgs), inline=True)
+        embed.add_field(name="🎙 Минут в войсе", value=str(v_mins), inline=True)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.set_footer(text="DIAMOND", icon_url=FOOTER_ICON)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @ui.button(label="Пригласить друга", style=discord.ButtonStyle.primary, custom_id="cabinet_invite", row=1)
+    async def btn_invite(self, interaction: discord.Interaction, button: ui.Button):
+        link = cabinet_invite_links.get(interaction.guild_id)
+        if not link:
+            return await interaction.response.send_message(
+                "❌ Пригласительная ссылка ещё не настроена администратором.", ephemeral=True
+            )
+        text = (
+            "**Чтобы пригласить друга, скопируй ссылку ниже**\n"
+            f"```\n{link}\n```\n"
+            "После вступления, друг должен заполнить тикет в канале "
+            "<#1466567658601189481>\n"
+            "__За каждого приглашенного человека в семью, полагается вознаграждение__"
+        )
+        await interaction.response.send_message(text, ephemeral=True)
+
+
+# ── Команды ──
+
+@tree.command(name="личный_кабинет", description="Создать панель личного кабинета в текущем канале")
+async def slash_cabinet(interaction: discord.Interaction):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+
+    gid = interaction.guild_id
+
+    # Удалить старую панель если есть
+    existing = cabinet_panels.get(gid)
+    if existing and existing.get("message_id"):
+        try:
+            old_ch  = interaction.guild.get_channel(existing["channel_id"])
+            old_msg = await old_ch.fetch_message(existing["message_id"])
+            await old_msg.delete()
+        except Exception:
+            pass
+
+    prev  = cabinet_panels.get(gid, {})
+    embed = build_cabinet_embed(gid)
+    msg   = await interaction.channel.send(embed=embed, view=PersonalCabinetView())
+
+    cabinet_panels[gid] = {
+        "channel_id": interaction.channel_id,
+        "message_id": msg.id,
+        "text":       prev.get("text"),
+        "image_url":  prev.get("image_url"),
+    }
+    save_data()
+    await interaction.response.send_message("✅ Личный кабинет создан.", ephemeral=True)
+
+
+@tree.command(name="личный_кабинет_фото", description="Изменить фото панели личного кабинета")
+@app_commands.describe(url="Ссылка на изображение")
+async def slash_cabinet_photo(interaction: discord.Interaction, url: str):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+    gid = interaction.guild_id
+    if gid not in cabinet_panels:
+        cabinet_panels[gid] = {}
+    cabinet_panels[gid]["image_url"] = url
+    save_data()
+    await _refresh_cabinet_panel(interaction.guild)
+    await interaction.response.send_message("✅ Фото кабинета обновлено!", ephemeral=True)
+
+
+@tree.command(name="личный_кабинет_текст", description="Изменить текст описания личного кабинета")
+@app_commands.describe(текст="Текст под заголовком")
+async def slash_cabinet_text(interaction: discord.Interaction, текст: str):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+    gid = interaction.guild_id
+    if gid not in cabinet_panels:
+        cabinet_panels[gid] = {}
+    cabinet_panels[gid]["text"] = текст
+    save_data()
+    await _refresh_cabinet_panel(interaction.guild)
+    await interaction.response.send_message("✅ Текст кабинета обновлён!", ephemeral=True)
+
+
+@tree.command(name="пригласительная_ссылка", description="Установить пригласительную ссылку для кнопки в личном кабинете")
+@app_commands.describe(ссылка="Ссылка-приглашение на сервер")
+async def slash_cabinet_invite(interaction: discord.Interaction, ссылка: str):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+    cabinet_invite_links[interaction.guild_id] = ссылка
+    save_data()
+    await interaction.response.send_message(f"✅ Пригласительная ссылка установлена: `{ссылка}`", ephemeral=True)
 
 
 # ─────────────────────────────────────────────

@@ -2545,6 +2545,22 @@ async def stats_command(interaction: discord.Interaction):
     await interaction.followup.send("✅ Панель создана, будет обновляться каждые 30 сек.", ephemeral=True)
 
 
+@bot.command(name="статистика")
+async def stats_prefix(ctx):
+    result = await fetch_gta5rp_stats()
+    if not result:
+        return await ctx.send("❌ Не удалось получить данные.")
+
+    servers, total = result
+    embed = build_stats_embed(servers, total)
+    msg = await ctx.send(embed=embed)
+
+    stats_panels[ctx.guild.id] = {
+        "channel_id": ctx.channel.id,
+        "message_id": msg.id,
+    }
+
+
 @tasks.loop(seconds=30)
 async def update_stats():
     if not stats_panels:

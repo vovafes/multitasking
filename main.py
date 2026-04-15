@@ -75,6 +75,12 @@ warn_roles: dict = {}
 # { guild_id: { "channel_id": int, "message_id": int } }
 shop_panels: dict = {}
 
+# 🛒 ЛОГИ МАГАЗИНА { guild_id: channel_id }
+shop_log_channels: dict = {}
+
+# 🛒 РОЛЬ ВЫДАЧИ ТОВАРОВ { guild_id: role_id }
+shop_manager_roles: dict = {}
+
 # 🎫 ПАНЕЛЬ ТИКЕТОВ
 # { guild_id: { "panel_channel_id": int, "review_channel_id": int, "message_id": int } }
 ticket_panels: dict = {}
@@ -445,6 +451,8 @@ def save_data():
         "inactive_panels":      {str(g): v for g, v in inactive_panels.items()},
         "event_lists":          event_lists_serial,
         "shop_panels":          {str(g): v for g, v in shop_panels.items()},
+        "shop_log_channels":    {str(g): v for g, v in shop_log_channels.items()},
+        "shop_manager_roles":   {str(g): v for g, v in shop_manager_roles.items()},
         "contract_settings":    {str(g): v for g, v in contract_settings.items()},
         "contract_roles":       {str(g): v for g, v in contract_roles.items()},
         "active_contracts":     {str(mid): v for mid, v in active_contracts.items()},
@@ -537,6 +545,10 @@ def load_data():
         # Панель магазина
         for g, v in data.get("shop_panels", {}).items():
             shop_panels[int(g)] = v
+        for g, v in data.get("shop_log_channels", {}).items():
+            shop_log_channels[int(g)] = v
+        for g, v in data.get("shop_manager_roles", {}).items():
+            shop_manager_roles[int(g)] = v
 
         # Контракты
         for g, v in data.get("contract_settings", {}).items():
@@ -1059,6 +1071,55 @@ async def refresh_shop_message(guild: discord.Guild):
         pass
 
 
+ACTION_LABELS = {
+    "remove_warn": "🗑 Снятие варна",
+    "give_role":   "🎭 Выдача роли",
+    "notify":      "📦 Ручная выдача",
+}
+
+async def _log_shop_purchase(
+    interaction: discord.Interaction,
+    item: dict,
+    price: int,
+    action: str,
+    extra: str | None = None,
+):
+    """Отправляет лог покупки в shop_log_channels.
+    Для action='notify' тегает shop_manager_roles — нужна ручная выдача."""
+    guild_id = interaction.guild_id
+    log_ch_id = shop_log_channels.get(guild_id)
+    if not log_ch_id:
+        return
+    log_ch = interaction.guild.get_channel(log_ch_id)
+    if not log_ch:
+        return
+
+    embed = discord.Embed(
+        title="🛒 Покупка в магазине",
+        color=discord.Color.gold(),
+        timestamp=datetime.now(),
+    )
+    embed.add_field(name="Покупатель", value=interaction.user.mention, inline=True)
+    embed.add_field(name="Товар", value=f"{item.get('emoji', '')} {item['name']}".strip(), inline=True)
+    embed.add_field(name="Цена", value=f"**{price}** 💎", inline=True)
+    embed.add_field(name="Тип", value=ACTION_LABELS.get(action, action), inline=True)
+    if extra:
+        embed.add_field(name="Выдано", value=extra, inline=True)
+    embed.set_footer(text="DIAMOND", icon_url=FOOTER_ICON)
+
+    # Тег роли только для ручной выдачи
+    content = None
+    if action == "notify":
+        mgr_role_id = shop_manager_roles.get(guild_id)
+        if mgr_role_id:
+            content = f"<@&{mgr_role_id}>"
+
+    try:
+        await log_ch.send(content=content, embed=embed)
+    except Exception:
+        pass
+
+
 class ShopItemButton(ui.Button):
     def __init__(self, item_id: str, item: dict, guild_id: int):
         super().__init__(
@@ -1094,7 +1155,6 @@ class ShopItemButton(ui.Button):
             warn_data = get_warns(guild_id, user_id)
             if not warn_data:
                 return await interaction.response.send_message("✅ У вас нет варнов для снятия!", ephemeral=True)
-            # Убрать варн-роли
             guild_warn_roles = warn_roles.get(guild_id, {})
             roles_to_remove = [interaction.guild.get_role(rid) for rid in guild_warn_roles.values()]
             try:
@@ -1103,6 +1163,7 @@ class ShopItemButton(ui.Button):
                 pass
             remove_warn(guild_id, user_id)
             add_points(guild_id, user_id, -price)
+            await _log_shop_purchase(interaction, item, price, action="remove_warn")
             embed = discord.Embed(title="✅ Варн снят!", description=f"Списано **{price}** 💎", color=discord.Color.green(), timestamp=datetime.now())
             embed.set_footer(text="DIAMOND", icon_url=FOOTER_ICON)
             return await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -1117,30 +1178,14 @@ class ShopItemButton(ui.Button):
             except Exception:
                 return await interaction.response.send_message("❌ Не удалось выдать роль.", ephemeral=True)
             add_points(guild_id, user_id, -price)
+            await _log_shop_purchase(interaction, item, price, action="give_role", extra=role.mention)
             embed = discord.Embed(title=f"✅ Куплено: {item['name']}", description=f"Роль {role.mention} выдана!\nСписано **{price}** 💎", color=discord.Color.green(), timestamp=datetime.now())
             embed.set_footer(text="DIAMOND", icon_url=FOOTER_ICON)
             return await interaction.response.send_message(embed=embed, ephemeral=True)
 
         else:  # notify — ручная выдача
             add_points(guild_id, user_id, -price)
-            # Уведомление в лог-канал если есть
-            log_channel_id = reject_log_channels.get(guild_id)
-            if log_channel_id:
-                log_ch = interaction.guild.get_channel(log_channel_id)
-                if log_ch:
-                    log_embed = discord.Embed(
-                        title="🛒 Покупка в магазине",
-                        color=discord.Color.gold(),
-                        timestamp=datetime.now(),
-                    )
-                    log_embed.add_field(name="Покупатель", value=interaction.user.mention, inline=True)
-                    log_embed.add_field(name="Товар", value=item["name"], inline=True)
-                    log_embed.add_field(name="Цена", value=f"{price} 💎", inline=True)
-                    log_embed.set_footer(text="DIAMOND", icon_url=FOOTER_ICON)
-                    try:
-                        await log_ch.send(embed=log_embed)
-                    except Exception:
-                        pass
+            await _log_shop_purchase(interaction, item, price, action="notify")
             embed = discord.Embed(
                 title=f"✅ Куплено: {item['name']}",
                 description=f"Списано **{price}** 💎\nАдминистратор скоро свяжется с вами.",
@@ -1749,6 +1794,26 @@ async def slash_item_role(interaction: discord.Interaction, товар_id: str, 
     guild_shop_items[gid][товар_id]["role_id"] = роль.id
     save_data()
     await interaction.response.send_message(f"✅ Роль {роль.mention} привязана к товару **{items[товар_id]['name']}**.", ephemeral=True)
+
+
+@tree.command(name="лог_магазина", description="Канал, куда пишутся все покупки из магазина")
+@app_commands.describe(канал="Текстовый канал для логов покупок")
+async def slash_shop_log(interaction: discord.Interaction, канал: discord.TextChannel):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+    shop_log_channels[interaction.guild_id] = канал.id
+    save_data()
+    await interaction.response.send_message(f"✅ Логи покупок будут отправляться в {канал.mention}.", ephemeral=True)
+
+
+@tree.command(name="роль_магазина", description="Роль, которая тегается при покупках с ручной выдачей (notify)")
+@app_commands.describe(роль="Роль ответственного за выдачу товаров")
+async def slash_shop_manager_role(interaction: discord.Interaction, роль: discord.Role):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+    shop_manager_roles[interaction.guild_id] = роль.id
+    save_data()
+    await interaction.response.send_message(f"✅ Роль {роль.mention} будет тегаться при покупках с ручной выдачей.", ephemeral=True)
 
 
 @bot.command(name="дать")

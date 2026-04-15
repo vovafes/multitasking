@@ -1105,6 +1105,24 @@ class ApplicationReviewView(ui.View):
         except Exception:
             pass
 
+        log_channel_id = reject_log_channels.get(interaction.guild_id)
+        if log_channel_id:
+            log_channel = interaction.guild.get_channel(log_channel_id)
+            if log_channel:
+                try:
+                    log_embed = discord.Embed(
+                        title="✅ Заявка одобрена",
+                        color=discord.Color.green(),
+                        timestamp=datetime.now(),
+                    )
+                    log_embed.add_field(name="Заявка от пользователя", value=f"<@{applicant_id}>", inline=False)
+                    log_embed.add_field(name="Одобрил", value=interaction.user.mention, inline=False)
+                    log_embed.set_thumbnail(url=FOOTER_ICON)
+                    log_embed.set_footer(text="DIAMOND", icon_url=FOOTER_ICON)
+                    await log_channel.send(embed=log_embed)
+                except Exception:
+                    pass
+
         await interaction.response.send_message(
             "✅ Заявка одобрена. Канал закроется через 10 секунд.", ephemeral=True
         )
@@ -2219,6 +2237,659 @@ async def slash_settings(interaction: discord.Interaction):
     )
     embed.set_footer(text="DIAMOND", icon_url=FOOTER_ICON)
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ─────────────────────────────────────────────
+# ПАНЕЛЬ НАСТРОЙКИ — /панель_настройки
+# ─────────────────────────────────────────────
+
+def _rs(guild: discord.Guild, role_id):
+    if not role_id:
+        return "⚠️ *не задана*"
+    r = guild.get_role(role_id)
+    return r.mention if r else "⚠️ *удалена*"
+
+def _cs(guild: discord.Guild, ch_id):
+    if not ch_id:
+        return "⚠️ *не задан*"
+    c = guild.get_channel(ch_id)
+    return c.mention if c else "⚠️ *удалён*"
+
+def _roles_list(guild: discord.Guild, ids: list) -> str:
+    return "\n".join(f"• <@&{r}>" for r in ids) if ids else "*нет*"
+
+def _channels_list(guild: discord.Guild, ids: list) -> str:
+    parts = []
+    for cid in ids:
+        ch = guild.get_channel(cid)
+        parts.append(f"• {ch.mention if ch else f'ID {cid}'}")
+    return "\n".join(parts) if parts else "*нет*"
+
+
+def build_cfg_main_embed(guild: discord.Guild) -> discord.Embed:
+    gid = guild.id
+    wr  = warn_roles.get(gid, {})
+    vs  = voice_reward_settings.get(gid, {})
+    fs  = feedback_settings.get(gid) or {}
+    cp  = cabinet_panels.get(gid, {})
+    op  = obshak_panels.get(gid, {})
+    ecr = event_command_roles.get(gid, {})
+    viewers = ticket_viewer_roles.get(gid, [])
+
+    def _ecr(t):
+        ids = ecr.get(t, [])
+        return ", ".join(f"<@&{r}>" for r in ids) if ids else "*только админ*"
+
+    e = discord.Embed(
+        title="⚙️ Панель настройки DIAMOND",
+        description="Выбери категорию в меню ниже для изменения настроек.",
+        color=0x2B2D31,
+        timestamp=datetime.now(),
+    )
+    e.add_field(name="📋 Заявки", value=(
+        f"Менеджер: {_rs(guild, ticket_manager_roles.get(gid))}\n"
+        f"Пинг: {_rs(guild, ticket_ping_role.get(gid))}\n"
+        f"Лог: {_cs(guild, reject_log_channels.get(gid))}\n"
+        f"Доступ ({len(viewers)}р.): {', '.join(f'<@&{r}>' for r in viewers) or '*нет*'}"
+    ), inline=True)
+    e.add_field(name="🔑 Роли", value=(
+        f"МП: {_rs(guild, mp_roles.get(gid))}\n"
+        f"ВЗП: {_rs(guild, vzp_roles.get(gid))}\n"
+        f"Реаки: {_rs(guild, event_roles.get(gid))}\n"
+        f"Магазин: {_rs(guild, shop_manager_roles.get(gid))}"
+    ), inline=True)
+    e.add_field(name="⚠️ Варн", value=(
+        f"1/3: {_rs(guild, wr.get(1))}\n"
+        f"2/3: {_rs(guild, wr.get(2))}\n"
+        f"3/3: {_rs(guild, wr.get(3))}"
+    ), inline=True)
+    e.add_field(name="📢 Логи", value=(
+        f"Заявки: {_cs(guild, reject_log_channels.get(gid))}\n"
+        f"Магазин: {_cs(guild, shop_log_channels.get(gid))}\n"
+        f"Общак: {_cs(guild, obshak_log_channels.get(gid))}\n"
+        f"Feedback: {_cs(guild, fs.get('log_channel_id'))}"
+    ), inline=True)
+    e.add_field(name="🎯 Сборы", value=(
+        f"ВЗП: {_ecr('взп')}\n"
+        f"МП: {_ecr('мп')}\n"
+        f"Реаки: {_ecr('реаки')}"
+    ), inline=True)
+    e.add_field(name="🔊 Войс / 🖼 Контент", value=(
+        f"💎/мин: **{vs.get('amount', 10)}**\n"
+        f"Ссылка кабинета: {'✅' if cabinet_invite_links.get(gid) else '⚠️ нет'}\n"
+        f"Fb-роль: {_rs(guild, fs.get('ping_role_id'))}"
+    ), inline=True)
+    e.set_footer(text="DIAMOND • Настройки сервера", icon_url=FOOTER_ICON)
+    return e
+
+
+def build_cfg_category_embed(guild: discord.Guild, category: str) -> discord.Embed:
+    gid = guild.id
+    e = discord.Embed(color=0x2B2D31, timestamp=datetime.now())
+    e.set_footer(text="DIAMOND • Настройки сервера", icon_url=FOOTER_ICON)
+
+    if category == "tickets":
+        viewers = ticket_viewer_roles.get(gid, [])
+        e.title = "📋 Заявки"
+        e.description = (
+            f"**Тикет-менеджер:** {_rs(guild, ticket_manager_roles.get(gid))}\n"
+            f"**Пинг-роль:** {_rs(guild, ticket_ping_role.get(gid))}\n"
+            f"**Лог канал:** {_cs(guild, reject_log_channels.get(gid))}\n"
+            f"**Роли доступа:**\n{_roles_list(guild, viewers)}"
+        )
+    elif category == "ticket_access":
+        viewers = ticket_viewer_roles.get(gid, [])
+        e.title = "👥 Роли доступа к тикетам"
+        e.description = f"Текущие роли:\n{_roles_list(guild, viewers)}\n\nДобавь или убери роль ниже."
+    elif category == "roles":
+        e.title = "🔑 Роли системы"
+        e.description = (
+            f"**МП:** {_rs(guild, mp_roles.get(gid))}\n"
+            f"**ВЗП:** {_rs(guild, vzp_roles.get(gid))}\n"
+            f"**Реаки:** {_rs(guild, event_roles.get(gid))}\n"
+            f"**Магазин (менеджер):** {_rs(guild, shop_manager_roles.get(gid))}"
+        )
+    elif category == "warns":
+        wr = warn_roles.get(gid, {})
+        e.title = "⚠️ Варн-роли"
+        e.description = (
+            f"**1/3:** {_rs(guild, wr.get(1))}\n"
+            f"**2/3:** {_rs(guild, wr.get(2))}\n"
+            f"**3/3:** {_rs(guild, wr.get(3))}"
+        )
+    elif category == "logs":
+        fs = feedback_settings.get(gid) or {}
+        e.title = "📢 Каналы и логи"
+        e.description = (
+            f"**Лог заявок:** {_cs(guild, reject_log_channels.get(gid))}\n"
+            f"**Лог магазина:** {_cs(guild, shop_log_channels.get(gid))}\n"
+            f"**Лог общака:** {_cs(guild, obshak_log_channels.get(gid))}\n"
+            f"**Feedback канал:** {_cs(guild, fs.get('log_channel_id'))}\n"
+            f"**Feedback пинг-роль:** {_rs(guild, fs.get('ping_role_id'))}"
+        )
+    elif category == "fb_role":
+        fs = feedback_settings.get(gid) or {}
+        e.title = "🔔 Feedback пинг-роль"
+        e.description = f"Текущая: {_rs(guild, fs.get('ping_role_id'))}"
+    elif category == "events":
+        ecr = event_command_roles.get(gid, {})
+        def _ecr(t):
+            ids = ecr.get(t, [])
+            return "\n".join(f"  • <@&{r}>" for r in ids) if ids else "  *только админ*"
+        e.title = "🎯 Доступ к командам сбора"
+        e.description = (
+            f"**!взп:**\n{_ecr('взп')}\n\n"
+            f"**!мп:**\n{_ecr('мп')}\n\n"
+            f"**!реаки:**\n{_ecr('реаки')}"
+        )
+    elif category in ("event_взп", "event_мп", "event_реаки"):
+        etype = category.split("_", 1)[1]
+        ecr = event_command_roles.get(gid, {})
+        ids = ecr.get(etype, [])
+        e.title = f"🎯 Доступ к !{etype}"
+        e.description = f"Роли:\n{_roles_list(guild, ids)}\n\nДобавь или убери роль ниже."
+    elif category == "voice":
+        vs = voice_reward_settings.get(gid, {})
+        e.title = "🔊 Голосовые каналы"
+        e.description = (
+            f"**💎 в минуту:** {vs.get('amount', 10)}\n\n"
+            f"**Категории для начисления:**\n{_channels_list(guild, vs.get('categories', []))}\n\n"
+            f"**Исключённые каналы:**\n{_channels_list(guild, vs.get('excluded_channels', []))}"
+        )
+    elif category == "content":
+        fs = feedback_settings.get(gid) or {}
+        cp = cabinet_panels.get(gid, {})
+        op = obshak_panels.get(gid, {})
+        link = cabinet_invite_links.get(gid)
+        e.title = "🖼 Контент — тексты, фото, ссылки"
+        e.description = (
+            f"**Личный кабинет**\n"
+            f"Текст: {'✅' if cp.get('text') else '⚠️ нет'}  "
+            f"Фото: {'✅' if cp.get('image_url') else '⚠️ нет'}  "
+            f"Ссылка: {'✅' if link else '⚠️ нет'}\n\n"
+            f"**Общак**\n"
+            f"Текст: {'✅' if op.get('text') else '⚠️ нет'}  "
+            f"Фото: {'✅' if op.get('image_url') else '⚠️ нет'}\n\n"
+            f"**Feedback**\n"
+            f"Текст: {'✅' if fs.get('text') else '⚠️ нет'}  "
+            f"Фото: {'✅' if fs.get('image_url') else '⚠️ нет'}"
+        )
+    return e
+
+
+# ── Главное меню ─────────────────────────────────────────────────────────────
+
+class CfgCategorySelect(ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="📋 Заявки",        value="tickets", description="Менеджер, пинг, лог, доступ, текст"),
+            discord.SelectOption(label="🔑 Роли системы",  value="roles",   description="МП, ВЗП, Реаки, Магазин"),
+            discord.SelectOption(label="⚠️ Варн-роли",     value="warns",   description="Роли за 1, 2, 3 предупреждения"),
+            discord.SelectOption(label="📢 Каналы / Логи", value="logs",    description="Логи и feedback канал/роль"),
+            discord.SelectOption(label="🎯 Сборы",          value="events",  description="Доступ к !взп !мп !реаки"),
+            discord.SelectOption(label="🔊 Голосовые",      value="voice",   description="Баллы, категории, исключения"),
+            discord.SelectOption(label="🖼 Контент",        value="content", description="Тексты, фото, ссылки панелей"),
+        ]
+        super().__init__(placeholder="Выбери категорию настроек…", options=options, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        cat   = self.values[0]
+        embed = build_cfg_category_embed(interaction.guild, cat)
+        view  = _cfg_make_view(interaction.guild, cat)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+
+class CfgMainView(ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+        self.add_item(CfgCategorySelect())
+
+
+# ── Универсальные модали ──────────────────────────────────────────────────────
+
+class VoiceAmountModal(ui.Modal, title="🔊 Баллы за войс в минуту"):
+    amount = ui.TextInput(label="Сколько 💎 начислять в минуту", placeholder="10", required=True)
+
+    def __init__(self, orig_message: discord.Message):
+        super().__init__()
+        self._orig_message = orig_message
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            val = int(str(self.amount))
+            if val < 1:
+                raise ValueError
+        except ValueError:
+            return await interaction.response.send_message("❌ Введи целое число больше 0.", ephemeral=True)
+        s = _get_voice_settings(interaction.guild_id)
+        s["amount"] = val
+        save_data()
+        await interaction.response.send_message(f"✅ Начисление: **{val}** 💎 в минуту.", ephemeral=True)
+        embed = build_cfg_category_embed(interaction.guild, "voice")
+        await self._orig_message.edit(embed=embed, view=_cfg_make_view(interaction.guild, "voice"))
+
+
+class _CfgTextModal(ui.Modal):
+    """Универсальный модал для изменения текстового значения."""
+    def __init__(self, title: str, label: str, default: str,
+                 apply_fn, cat_key: str, orig_message: discord.Message,
+                 style=discord.TextStyle.short, refresh_fn=None):
+        super().__init__(title=title)
+        self._apply      = apply_fn
+        self._cat_key    = cat_key
+        self._orig_msg   = orig_message
+        self._refresh_fn = refresh_fn
+        self.field = ui.TextInput(label=label, default=default or "", style=style, required=True)
+        self.add_item(self.field)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        val = str(self.field)
+        self._apply(interaction.guild_id, val)
+        save_data()
+        if self._refresh_fn:
+            await self._refresh_fn(interaction.guild)
+        await interaction.response.send_message("✅ Сохранено!", ephemeral=True)
+        embed = build_cfg_category_embed(interaction.guild, self._cat_key)
+        await self._orig_msg.edit(embed=embed, view=_cfg_make_view(interaction.guild, self._cat_key))
+
+
+# ── Базовые пикеры ────────────────────────────────────────────────────────────
+
+class _CfgRolePicker(ui.RoleSelect):
+    def __init__(self, apply_fn, cat_key: str, row: int, placeholder: str):
+        super().__init__(placeholder=placeholder, row=row)
+        self._apply   = apply_fn
+        self._cat_key = cat_key
+
+    async def callback(self, interaction: discord.Interaction):
+        role = self.values[0]
+        self._apply(interaction.guild_id, role.id)
+        save_data()
+        await interaction.response.send_message(f"✅ Сохранено: {role.mention}", ephemeral=True)
+        embed = build_cfg_category_embed(interaction.guild, self._cat_key)
+        await interaction.message.edit(embed=embed)
+
+
+class _CfgChannelPicker(ui.ChannelSelect):
+    def __init__(self, apply_fn, cat_key: str, row: int, placeholder: str,
+                 channel_types=None):
+        super().__init__(
+            placeholder=placeholder,
+            channel_types=channel_types or [discord.ChannelType.text],
+            row=row,
+        )
+        self._apply   = apply_fn
+        self._cat_key = cat_key
+
+    async def callback(self, interaction: discord.Interaction):
+        ch = self.values[0]
+        self._apply(interaction.guild_id, ch.id)
+        save_data()
+        await interaction.response.send_message(f"✅ Сохранено: {ch.mention}", ephemeral=True)
+        embed = build_cfg_category_embed(interaction.guild, self._cat_key)
+        await interaction.message.edit(embed=embed)
+
+
+class _CfgRoleAddPicker(ui.RoleSelect):
+    """Добавить роль в список."""
+    def __init__(self, list_fn, cat_key: str, row: int, placeholder: str):
+        super().__init__(placeholder=placeholder, row=row)
+        self._list_fn = list_fn
+        self._cat_key = cat_key
+
+    async def callback(self, interaction: discord.Interaction):
+        role = self.values[0]
+        lst  = self._list_fn(interaction.guild_id)
+        if role.id not in lst:
+            lst.append(role.id)
+        save_data()
+        await interaction.response.send_message(f"✅ Добавлено: {role.mention}", ephemeral=True)
+        embed = build_cfg_category_embed(interaction.guild, self._cat_key)
+        await interaction.message.edit(embed=embed, view=_cfg_make_view(interaction.guild, self._cat_key))
+
+
+class _CfgRoleRemoveSelect(ui.Select):
+    """Убрать роль из списка."""
+    def __init__(self, guild: discord.Guild, role_ids: list, list_fn, cat_key: str, row: int, placeholder: str):
+        options = [
+            discord.SelectOption(label=(guild.get_role(rid).name if guild.get_role(rid) else f"ID {rid}"), value=str(rid))
+            for rid in role_ids
+        ] or [discord.SelectOption(label="(список пуст)", value="__empty__")]
+        super().__init__(placeholder=placeholder, options=options, disabled=not role_ids, row=row)
+        self._list_fn = list_fn
+        self._cat_key = cat_key
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "__empty__":
+            return await interaction.response.defer()
+        rid = int(self.values[0])
+        lst = self._list_fn(interaction.guild_id)
+        if rid in lst:
+            lst.remove(rid)
+        save_data()
+        await interaction.response.send_message("✅ Убрано.", ephemeral=True)
+        embed = build_cfg_category_embed(interaction.guild, self._cat_key)
+        await interaction.message.edit(embed=embed, view=_cfg_make_view(interaction.guild, self._cat_key))
+
+
+class _CfgChannelAddPicker(ui.ChannelSelect):
+    """Добавить канал/категорию в список."""
+    def __init__(self, list_fn, cat_key: str, row: int, placeholder: str, channel_types=None):
+        super().__init__(
+            placeholder=placeholder,
+            channel_types=channel_types or [discord.ChannelType.category],
+            row=row,
+        )
+        self._list_fn = list_fn
+        self._cat_key = cat_key
+
+    async def callback(self, interaction: discord.Interaction):
+        ch  = self.values[0]
+        lst = self._list_fn(interaction.guild_id)
+        if ch.id not in lst:
+            lst.append(ch.id)
+        save_data()
+        await interaction.response.send_message(f"✅ Добавлено: {ch.name}", ephemeral=True)
+        embed = build_cfg_category_embed(interaction.guild, self._cat_key)
+        await interaction.message.edit(embed=embed, view=_cfg_make_view(interaction.guild, self._cat_key))
+
+
+class _CfgChannelRemoveSelect(ui.Select):
+    """Убрать канал из списка."""
+    def __init__(self, guild: discord.Guild, ch_ids: list, list_fn, cat_key: str, row: int, placeholder: str):
+        options = [
+            discord.SelectOption(label=(guild.get_channel(cid).name if guild.get_channel(cid) else f"ID {cid}"), value=str(cid))
+            for cid in ch_ids
+        ] or [discord.SelectOption(label="(список пуст)", value="__empty__")]
+        super().__init__(placeholder=placeholder, options=options, disabled=not ch_ids, row=row)
+        self._list_fn = list_fn
+        self._cat_key = cat_key
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "__empty__":
+            return await interaction.response.defer()
+        cid = int(self.values[0])
+        lst = self._list_fn(interaction.guild_id)
+        if cid in lst:
+            lst.remove(cid)
+        save_data()
+        await interaction.response.send_message("✅ Убрано.", ephemeral=True)
+        embed = build_cfg_category_embed(interaction.guild, self._cat_key)
+        await interaction.message.edit(embed=embed, view=_cfg_make_view(interaction.guild, self._cat_key))
+
+
+def _cfg_btn(label: str, style=discord.ButtonStyle.secondary, row: int = 0):
+    """Создать кнопку с колбэком через замыкание."""
+    btn = ui.Button(label=label, style=style, row=row)
+    return btn
+
+
+# ── View-классы по категориям ─────────────────────────────────────────────────
+
+class _CfgTicketsView(ui.View):
+    def __init__(self, guild: discord.Guild):
+        super().__init__(timeout=300)
+
+        back = _cfg_btn("◀ Назад", row=0)
+        async def _back(inter): await inter.response.edit_message(embed=build_cfg_main_embed(inter.guild), view=CfgMainView())
+        back.callback = _back
+        self.add_item(back)
+
+        btn_text = _cfg_btn("✏️ Текст панели", row=0)
+        async def _text(inter): await inter.response.send_modal(TicketTextModal(inter.guild_id))
+        btn_text.callback = _text
+        self.add_item(btn_text)
+
+        btn_access = _cfg_btn("👥 Роли доступа →", row=0)
+        async def _access(inter):
+            await inter.response.edit_message(
+                embed=build_cfg_category_embed(inter.guild, "ticket_access"),
+                view=_CfgTicketAccessView(inter.guild),
+            )
+        btn_access.callback = _access
+        self.add_item(btn_access)
+
+        self.add_item(_CfgRolePicker(lambda gid, rid: ticket_manager_roles.__setitem__(gid, rid), "tickets", 1, "🛡 Тикет-менеджер — выбери роль"))
+        self.add_item(_CfgRolePicker(lambda gid, rid: ticket_ping_role.__setitem__(gid, rid), "tickets", 2, "🔔 Пинг-роль — выбери роль"))
+        self.add_item(_CfgChannelPicker(lambda gid, cid: reject_log_channels.__setitem__(gid, cid), "tickets", 3, "📢 Лог канал — выбери канал"))
+
+
+class _CfgTicketAccessView(ui.View):
+    def __init__(self, guild: discord.Guild):
+        super().__init__(timeout=300)
+        gid = guild.id
+
+        back = _cfg_btn("◀ Назад к заявкам", row=0)
+        async def _back(inter):
+            await inter.response.edit_message(
+                embed=build_cfg_category_embed(inter.guild, "tickets"),
+                view=_CfgTicketsView(inter.guild),
+            )
+        back.callback = _back
+        self.add_item(back)
+
+        def get_list(gid_): return ticket_viewer_roles.setdefault(gid_, [])
+        self.add_item(_CfgRoleAddPicker(get_list, "ticket_access", 1, "➕ Добавить роль доступа"))
+        self.add_item(_CfgRoleRemoveSelect(guild, ticket_viewer_roles.get(gid, []), get_list, "ticket_access", 2, "➖ Убрать роль доступа"))
+
+
+class _CfgRolesView(ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+        back = _cfg_btn("◀ Назад", row=0)
+        async def _back(inter): await inter.response.edit_message(embed=build_cfg_main_embed(inter.guild), view=CfgMainView())
+        back.callback = _back
+        self.add_item(back)
+        self.add_item(_CfgRolePicker(lambda gid, rid: mp_roles.__setitem__(gid, rid), "roles", 1, "🏎 МП — выбери роль"))
+        self.add_item(_CfgRolePicker(lambda gid, rid: vzp_roles.__setitem__(gid, rid), "roles", 2, "⚔️ ВЗП — выбери роль"))
+        self.add_item(_CfgRolePicker(lambda gid, rid: event_roles.__setitem__(gid, rid), "roles", 3, "🎯 Реаки — выбери роль"))
+        self.add_item(_CfgRolePicker(lambda gid, rid: shop_manager_roles.__setitem__(gid, rid), "roles", 4, "🛍 Магазин — выбери роль"))
+
+
+class _CfgWarnsView(ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+        back = _cfg_btn("◀ Назад", row=0)
+        async def _back(inter): await inter.response.edit_message(embed=build_cfg_main_embed(inter.guild), view=CfgMainView())
+        back.callback = _back
+        self.add_item(back)
+        self.add_item(_CfgRolePicker(lambda gid, rid: warn_roles.setdefault(gid, {}).__setitem__(1, rid), "warns", 1, "⚠️ Варн 1/3 — выбери роль"))
+        self.add_item(_CfgRolePicker(lambda gid, rid: warn_roles.setdefault(gid, {}).__setitem__(2, rid), "warns", 2, "⚠️⚠️ Варн 2/3 — выбери роль"))
+        self.add_item(_CfgRolePicker(lambda gid, rid: warn_roles.setdefault(gid, {}).__setitem__(3, rid), "warns", 3, "🚨 Варн 3/3 — выбери роль"))
+
+
+class _CfgLogsView(ui.View):
+    def __init__(self, guild: discord.Guild):
+        super().__init__(timeout=300)
+        gid = guild.id
+
+        back = _cfg_btn("◀ Назад", row=0)
+        async def _back(inter): await inter.response.edit_message(embed=build_cfg_main_embed(inter.guild), view=CfgMainView())
+        back.callback = _back
+        self.add_item(back)
+
+        btn_fb_role = _cfg_btn("🔔 Feedback роль →", row=0)
+        async def _fb(inter):
+            await inter.response.edit_message(
+                embed=build_cfg_category_embed(inter.guild, "fb_role"),
+                view=_CfgFbRoleView(inter.guild),
+            )
+        btn_fb_role.callback = _fb
+        self.add_item(btn_fb_role)
+
+        self.add_item(_CfgChannelPicker(lambda gid, cid: reject_log_channels.__setitem__(gid, cid), "logs", 1, "📋 Лог заявок — выбери канал"))
+        self.add_item(_CfgChannelPicker(lambda gid, cid: shop_log_channels.__setitem__(gid, cid), "logs", 2, "🛍 Лог магазина — выбери канал"))
+        self.add_item(_CfgChannelPicker(lambda gid, cid: obshak_log_channels.__setitem__(gid, cid), "logs", 3, "💰 Лог общака — выбери канал"))
+        self.add_item(_CfgChannelPicker(lambda gid, cid: feedback_settings.setdefault(gid, {}).__setitem__("log_channel_id", cid), "logs", 4, "💬 Feedback канал — выбери канал"))
+
+
+class _CfgFbRoleView(ui.View):
+    def __init__(self, guild: discord.Guild):
+        super().__init__(timeout=300)
+        back = _cfg_btn("◀ Назад к логам", row=0)
+        async def _back(inter):
+            await inter.response.edit_message(
+                embed=build_cfg_category_embed(inter.guild, "logs"),
+                view=_CfgLogsView(inter.guild),
+            )
+        back.callback = _back
+        self.add_item(back)
+        self.add_item(_CfgRolePicker(
+            lambda gid, rid: feedback_settings.setdefault(gid, {}).__setitem__("ping_role_id", rid),
+            "fb_role", 1, "🔔 Feedback пинг-роль — выбери роль",
+        ))
+
+
+class _CfgEventsView(ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+        back = _cfg_btn("◀ Назад", row=0)
+        async def _back(inter): await inter.response.edit_message(embed=build_cfg_main_embed(inter.guild), view=CfgMainView())
+        back.callback = _back
+        self.add_item(back)
+
+        for label, etype in [("⚔️ ВЗП", "взп"), ("🏎 МП", "мп"), ("🎯 Реаки", "реаки")]:
+            btn = _cfg_btn(label, style=discord.ButtonStyle.primary, row=1)
+            async def _cb(inter, et=etype):
+                await inter.response.edit_message(
+                    embed=build_cfg_category_embed(inter.guild, f"event_{et}"),
+                    view=_CfgEventTypeView(inter.guild, et),
+                )
+            btn.callback = _cb
+            self.add_item(btn)
+
+
+class _CfgEventTypeView(ui.View):
+    def __init__(self, guild: discord.Guild, etype: str):
+        super().__init__(timeout=300)
+        gid = guild.id
+        cat_key = f"event_{etype}"
+
+        back = _cfg_btn("◀ Назад к сборам", row=0)
+        async def _back(inter):
+            await inter.response.edit_message(
+                embed=build_cfg_category_embed(inter.guild, "events"),
+                view=_CfgEventsView(),
+            )
+        back.callback = _back
+        self.add_item(back)
+
+        def get_list(gid_): return event_command_roles.setdefault(gid_, {}).setdefault(etype, [])
+        self.add_item(_CfgRoleAddPicker(get_list, cat_key, 1, f"➕ Добавить роль к !{etype}"))
+        current = (event_command_roles.get(gid) or {}).get(etype, [])
+        self.add_item(_CfgRoleRemoveSelect(guild, current, get_list, cat_key, 2, f"➖ Убрать роль из !{etype}"))
+
+
+class _CfgVoiceView(ui.View):
+    def __init__(self, guild: discord.Guild):
+        super().__init__(timeout=300)
+        gid = guild.id
+        vs  = voice_reward_settings.get(gid, {})
+
+        back = _cfg_btn("◀ Назад", row=0)
+        async def _back(inter): await inter.response.edit_message(embed=build_cfg_main_embed(inter.guild), view=CfgMainView())
+        back.callback = _back
+        self.add_item(back)
+
+        btn_amount = _cfg_btn("✏️ Баллы в минуту", style=discord.ButtonStyle.primary, row=0)
+        async def _amount(inter): await inter.response.send_modal(VoiceAmountModal(inter.message))
+        btn_amount.callback = _amount
+        self.add_item(btn_amount)
+
+        def get_cats(gid_): return _get_voice_settings(gid_)["categories"]
+        def get_excl(gid_): return _get_voice_settings(gid_)["excluded_channels"]
+
+        self.add_item(_CfgChannelAddPicker(get_cats, "voice", 1, "➕ Добавить категорию войса", [discord.ChannelType.category]))
+        self.add_item(_CfgChannelRemoveSelect(guild, vs.get("categories", []), get_cats, "voice", 2, "➖ Убрать категорию"))
+        self.add_item(_CfgChannelAddPicker(get_excl, "voice", 3, "➕ Исключить голосовой канал", [discord.ChannelType.voice]))
+        self.add_item(_CfgChannelRemoveSelect(guild, vs.get("excluded_channels", []), get_excl, "voice", 4, "➖ Вернуть канал"))
+
+
+class _CfgContentView(ui.View):
+    def __init__(self, guild: discord.Guild):
+        super().__init__(timeout=300)
+        gid = guild.id
+        cp  = cabinet_panels.get(gid, {})
+        op  = obshak_panels.get(gid, {})
+        fs  = feedback_settings.get(gid) or {}
+
+        back = _cfg_btn("◀ Назад", row=0)
+        async def _back(inter): await inter.response.edit_message(embed=build_cfg_main_embed(inter.guild), view=CfgMainView())
+        back.callback = _back
+        self.add_item(back)
+
+        def _modal_btn(label, title, field_label, default_fn, apply_fn, cat_key, row, style=discord.ButtonStyle.secondary, text_style=discord.TextStyle.short, refresh_fn=None):
+            btn = _cfg_btn(label, style=style, row=row)
+            async def _cb(inter):
+                await inter.response.send_modal(_CfgTextModal(
+                    title, field_label, default_fn(inter.guild_id),
+                    apply_fn, cat_key, inter.message,
+                    style=text_style, refresh_fn=refresh_fn,
+                ))
+            btn.callback = _cb
+            return btn
+
+        # Личный кабинет
+        self.add_item(_modal_btn("✏️ Кабинет текст", "Кабинет — текст", "Текст описания",
+            lambda gid: (cabinet_panels.get(gid) or {}).get("text", ""),
+            lambda gid, v: cabinet_panels.setdefault(gid, {}).__setitem__("text", v),
+            "content", row=1, text_style=discord.TextStyle.paragraph, refresh_fn=_refresh_cabinet_panel))
+        self.add_item(_modal_btn("🖼 Кабинет фото", "Кабинет — фото", "Ссылка на изображение",
+            lambda gid: (cabinet_panels.get(gid) or {}).get("image_url", ""),
+            lambda gid, v: cabinet_panels.setdefault(gid, {}).__setitem__("image_url", v),
+            "content", row=1, refresh_fn=_refresh_cabinet_panel))
+        self.add_item(_modal_btn("🔗 Ссылка кабинета", "Пригласительная ссылка", "Ссылка-приглашение",
+            lambda gid: cabinet_invite_links.get(gid, ""),
+            lambda gid, v: cabinet_invite_links.__setitem__(gid, v),
+            "content", row=1))
+
+        # Общак
+        self.add_item(_modal_btn("✏️ Общак текст", "Общак — текст", "Текст описания",
+            lambda gid: (obshak_panels.get(gid) or {}).get("text", ""),
+            lambda gid, v: obshak_panels.setdefault(gid, {}).__setitem__("text", v),
+            "content", row=2, text_style=discord.TextStyle.paragraph, refresh_fn=_refresh_obshak_panel))
+        self.add_item(_modal_btn("🖼 Общак фото", "Общак — фото", "Ссылка на изображение",
+            lambda gid: (obshak_panels.get(gid) or {}).get("image_url", ""),
+            lambda gid, v: obshak_panels.setdefault(gid, {}).__setitem__("image_url", v),
+            "content", row=2, refresh_fn=_refresh_obshak_panel))
+
+        # Feedback
+        self.add_item(_modal_btn("✏️ Feedback текст", "Feedback — текст", "Текст описания",
+            lambda gid: (feedback_settings.get(gid) or {}).get("text", ""),
+            lambda gid, v: feedback_settings.setdefault(gid, {}).__setitem__("text", v),
+            "content", row=3, text_style=discord.TextStyle.paragraph, refresh_fn=_refresh_feedback_panel))
+        self.add_item(_modal_btn("🖼 Feedback фото", "Feedback — фото", "Ссылка на изображение",
+            lambda gid: (feedback_settings.get(gid) or {}).get("image_url", ""),
+            lambda gid, v: feedback_settings.setdefault(gid, {}).__setitem__("image_url", v),
+            "content", row=3, refresh_fn=_refresh_feedback_panel))
+
+
+# ── Фабрика view по ключу категории ──────────────────────────────────────────
+
+def _cfg_make_view(guild: discord.Guild, cat: str) -> ui.View:
+    if cat == "tickets":        return _CfgTicketsView(guild)
+    if cat == "ticket_access":  return _CfgTicketAccessView(guild)
+    if cat == "roles":          return _CfgRolesView()
+    if cat == "warns":          return _CfgWarnsView()
+    if cat == "logs":           return _CfgLogsView(guild)
+    if cat == "fb_role":        return _CfgFbRoleView(guild)
+    if cat == "events":         return _CfgEventsView()
+    if cat.startswith("event_"):
+        return _CfgEventTypeView(guild, cat.split("_", 1)[1])
+    if cat == "voice":          return _CfgVoiceView(guild)
+    if cat == "content":        return _CfgContentView(guild)
+    return CfgMainView()
+
+
+# ── Команда ───────────────────────────────────────────────────────────────────
+
+@tree.command(name="панель_настройки", description="Интерактивная панель настройки бота")
+async def slash_settings_panel(interaction: discord.Interaction):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+    embed = build_cfg_main_embed(interaction.guild)
+    view  = CfgMainView()
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 # ─────────────────────────────────────────────

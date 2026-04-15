@@ -3314,15 +3314,12 @@ def build_obshak_embed(guild_id: int) -> discord.Embed:
     settings = obshak_panels.get(guild_id, {})
     text      = settings.get("text") or DEFAULT_OBSHAK_TEXT
     image_url = settings.get("image_url")
-    total     = sum(d["amount"] for d in obshak_deposits.get(guild_id, []))
 
     embed = discord.Embed(
         title="💰 ОБЩАК СЕМЬИ",
         description=text,
         color=0xf1c40f,
-        timestamp=datetime.now(),
     )
-    embed.add_field(name="💵 Баланс", value=f"**{format_amount(total)}$**", inline=False)
     if image_url:
         embed.set_image(url=image_url)
     embed.set_footer(text="DIAMOND", icon_url=FOOTER_ICON)

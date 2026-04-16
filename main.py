@@ -715,7 +715,7 @@ class SlotButton(ui.Button):
 
         save_data()
         new_view = EventView(self.message_id)
-        embed    = build_event_embed(data["title"], data["max"], slots, data.get("image_url"), data.get("note"))
+        embed    = build_event_embed(interaction.guild_id, data["title"], data["max"], slots, data.get("image_url"), data.get("note"))
         await interaction.response.defer()
         await interaction.message.edit(embed=embed, view=new_view)
         await update_thread_list(self.message_id)
@@ -761,7 +761,7 @@ class JoinButton(ui.Button):
             if uid == user_id:
                 slots[slot_num] = None
                 save_data()
-                embed = build_event_embed(data["title"], data["max"], slots, data.get("image_url"), data.get("note"), join_mode=True)
+                embed = build_event_embed(interaction.guild_id, data["title"], data["max"], slots, data.get("image_url"), data.get("note"), join_mode=True)
                 await interaction.response.defer()
                 await interaction.message.edit(embed=embed)
                 await update_thread_list(self.message_id)
@@ -773,7 +773,7 @@ class JoinButton(ui.Button):
             if slots.get(i) is None:
                 slots[i] = user_id
                 save_data()
-                embed = build_event_embed(data["title"], data["max"], slots, data.get("image_url"), data.get("note"), join_mode=True)
+                embed = build_event_embed(interaction.guild_id, data["title"], data["max"], slots, data.get("image_url"), data.get("note"), join_mode=True)
                 await interaction.response.defer()
                 await interaction.message.edit(embed=embed)
                 await update_thread_list(self.message_id)
@@ -1341,7 +1341,7 @@ async def _create_event_message(channel, guild, title: str, max_count: int, imag
     join_mode = force_join_mode or max_count > 24
     slots     = {i: None for i in range(1, max_count + 1)}
 
-    embed = build_event_embed(title, max_count, slots, image_ref, join_mode=join_mode)
+    embed = build_event_embed(guild.id, title, max_count, slots, image_ref, join_mode=join_mode)
 
     if image_file:
         msg = await channel.send(content=content, embed=embed, file=image_file)
@@ -2139,7 +2139,7 @@ async def замена_cmd(ctx, кого: int, на_кого: int = 0):
         channel = bot.get_channel(data["channel_id"])
         msg = await channel.fetch_message(msg_id)
         join_mode = data.get("mode") == "join"
-        embed = build_event_embed(data["title"], data["max"], slots, data.get("image_url"), data.get("note"), join_mode=join_mode)
+        embed = build_event_embed(ctx.guild.id, data["title"], data["max"], slots, data.get("image_url"), data.get("note"), join_mode=join_mode)
         view = JoinEventView(msg_id) if join_mode else EventView(msg_id)
         await msg.edit(embed=embed, view=view)
     except Exception:

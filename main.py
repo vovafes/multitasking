@@ -38,7 +38,7 @@ DEFAULT_TICKET_DESC  = (
     "**TICKET OPEN MURRIETA**\n"
     "Набор в семью открыт на серверах: **Murrieta**\n\n"
     "Для тех кто играет **ВЗП**:\n"
-    "Полный откат с 2 терр обновленного ВЗП и откат любого ДМ/архивы взп не позднее месячной давности.\n"
+    "Полный откат с 2 терр обновленного ВЗП и откат любого ДМ/архивы vzp не позднее месячной давности.\n"
     "Для тех кто играет **РП**:\n"
     "Откаты с поставок/взх и откат любого ДМ не позднее месячной давности."
 )
@@ -121,7 +121,7 @@ mp_roles: dict = {}
 # 🔫 РОЛЬ ВЗП { guild_id: role_id }
 vzp_roles: dict = {}
 
-# 🎯 РОЛИ ДОСТУПА К КОМАНДАМ СБОРОВ { guild_id: { "взп": [role_id,...], "мп": [...], "реаки": [...] } }
+# 🎯 РОЛИ ДОСТУПА К КОМАНДАМ СБОРОВ { guild_id: { "vzp": [role_id,...], "mp": [...], "list": [...] } }
 event_command_roles: dict = {}
 
 # 🔒 ПРИВАТНЫЕ КОМНАТЫ
@@ -209,7 +209,7 @@ def is_admin_ctx(ctx) -> bool:
     return ctx.author.guild_permissions.administrator
 
 def can_run_event(ctx, event_type: str) -> bool:
-    """Проверка доступа к командам сборов (!взп, !мп, !реаки). Админ всегда может."""
+    """Проверка доступа к командам сборов (!vzp, !mp, !list). Админ всегда может."""
     if is_admin_ctx(ctx):
         return True
     allowed = event_command_roles.get(ctx.guild.id, {}).get(event_type, [])
@@ -1319,12 +1319,12 @@ class ShopView(ui.View):
 async def set_event_role(ctx, роль: discord.Role):
     if not is_admin_ctx(ctx):
         return await ctx.message.delete()
-    """!роль_реаки @роль — настроить роль для тега при !взп и !реаки"""
+    """!роль_реаки @роль — настроить роль для тега при !vzp и !list"""
     event_roles[ctx.guild.id] = роль.id
     save_data()
     embed = discord.Embed(
         title="✅ Роль настроена",
-        description=f"При каждом `!взп` и `!реаки` будет тегаться {роль.mention}",
+        description=f"При каждом `!vzp` и `!list` будет тегаться {роль.mention}",
         color=discord.Color.green(),
     )
     embed.set_footer(text="DIAMOND", icon_url=_footer(ctx.guild.id))
@@ -1383,10 +1383,10 @@ async def _create_event_message(channel, guild, title: str, max_count: int, imag
 # ─────────────────────────────────────────────
 # PREFIX-КОМАНДЫ СБОРОВ
 # ─────────────────────────────────────────────
-@bot.command(name="взп")
+@bot.command(name="vzp")
 async def взп_cmd(ctx, количество: int = 10, *, название: str = "ВЗП"):
-    """!взп [количество] [название] — сбор с фото (от лица бота)"""
-    if not can_run_event(ctx, "взп"):
+    """!vzp [количество] [название] — сбор с фото (от лица бота)"""
+    if not can_run_event(ctx, "vzp"):
         return await ctx.message.delete()
 
     image_file = None
@@ -1424,10 +1424,10 @@ async def взп_cmd(ctx, количество: int = 10, *, название: s
     await _create_event_message(ctx.channel, ctx.guild, название, количество, image_file, image_ref, content=content)
 
 
-@bot.command(name="мп")
+@bot.command(name="mp")
 async def мп_cmd(ctx, количество: int = 10, *, название: str = "МП"):
-    """!мп [количество] [название] — сбор МП"""
-    if not can_run_event(ctx, "мп"):
+    """!mp [количество] [название] — сбор МП"""
+    if not can_run_event(ctx, "mp"):
         return await ctx.message.delete()
 
     image_file = None
@@ -1460,14 +1460,14 @@ async def мп_cmd(ctx, количество: int = 10, *, название: str
 
 @bot.command(name="роль_взп")
 async def set_vzp_role(ctx, роль: discord.Role):
-    """!роль_взп @роль — настроить роль ВЗП для тега в !взп"""
+    """!роль_взп @роль — настроить роль ВЗП для тега в !vzp"""
     if not is_admin_ctx(ctx):
         return await ctx.message.delete()
     vzp_roles[ctx.guild.id] = роль.id
     save_data()
     embed = discord.Embed(
         title="✅ Роль ВЗП настроена",
-        description=f"В `!взп` будет тегаться {роль.mention}",
+        description=f"В `!vzp` будет тегаться {роль.mention}",
         color=discord.Color.green(),
     )
     embed.set_footer(text="DIAMOND", icon_url=_footer(ctx.guild.id))
@@ -1477,14 +1477,14 @@ async def set_vzp_role(ctx, роль: discord.Role):
 
 @bot.command(name="роль_мп")
 async def set_mp_role(ctx, роль: discord.Role):
-    """!роль_мп @роль — настроить роль МП для тега в !взп и !мп"""
+    """!роль_мп @роль — настроить роль МП для тега в !vzp и !mp"""
     if not is_admin_ctx(ctx):
         return await ctx.message.delete()
     mp_roles[ctx.guild.id] = роль.id
     save_data()
     embed = discord.Embed(
         title="✅ Роль МП настроена",
-        description=f"В `!взп` и `!мп` будет тегаться {роль.mention}",
+        description=f"В `!vzp` и `!mp` будет тегаться {роль.mention}",
         color=discord.Color.green(),
     )
     embed.set_footer(text="DIAMOND", icon_url=_footer(ctx.guild.id))
@@ -1494,13 +1494,13 @@ async def set_mp_role(ctx, роль: discord.Role):
 
 @tree.command(name="доступ_сбора", description="Добавить роль с доступом к команде сбора")
 @app_commands.describe(
-    тип="Тип сбора: взп, мп или реаки",
+    тип="Тип сбора: vzp, mp или list",
     роль="Роль, которая получит доступ к команде"
 )
 @app_commands.choices(тип=[
-    app_commands.Choice(name="взп", value="взп"),
-    app_commands.Choice(name="мп", value="мп"),
-    app_commands.Choice(name="реаки", value="реаки"),
+    app_commands.Choice(name="vzp", value="vzp"),
+    app_commands.Choice(name="mp", value="mp"),
+    app_commands.Choice(name="list", value="list"),
 ])
 async def slash_event_access_add(interaction: discord.Interaction, тип: str, роль: discord.Role):
     if not is_admin(interaction):
@@ -1522,13 +1522,13 @@ async def slash_event_access_add(interaction: discord.Interaction, тип: str, 
 
 @tree.command(name="убрать_доступ_сбора", description="Убрать роль из доступа к команде сбора")
 @app_commands.describe(
-    тип="Тип сбора: взп, мп или реаки",
+    тип="Тип сбора: vzp, mp или list",
     роль="Роль, которую убрать"
 )
 @app_commands.choices(тип=[
-    app_commands.Choice(name="взп", value="взп"),
-    app_commands.Choice(name="мп", value="мп"),
-    app_commands.Choice(name="реаки", value="реаки"),
+    app_commands.Choice(name="vzp", value="vzp"),
+    app_commands.Choice(name="mp", value="mp"),
+    app_commands.Choice(name="list", value="list"),
 ])
 async def slash_event_access_remove(interaction: discord.Interaction, тип: str, роль: discord.Role):
     if not is_admin(interaction):
@@ -1542,10 +1542,10 @@ async def slash_event_access_remove(interaction: discord.Interaction, тип: st
     await interaction.response.send_message(f"✅ {роль.mention} убрана из доступа к `!{тип}`.", ephemeral=True)
 
 
-@bot.command(name="реаки")
+@bot.command(name="list")
 async def реаки_cmd(ctx, количество: int = 10, *, название: str = "Реакции"):
-    """!реаки [количество] [название] — сбор на мероприятие (от лица бота)"""
-    if not can_run_event(ctx, "реаки"):
+    """!list [количество] [название] — сбор на мероприятие (от лица бота)"""
+    if not can_run_event(ctx, "list"):
         return await ctx.message.delete()
 
     image_file = None
@@ -2211,7 +2211,7 @@ async def slash_settings(interaction: discord.Interaction):
             f"Тикет-менеджер: {role_str(ticket_manager_roles.get(gid))}\n"
             f"Роль ВЗП: {role_str(vzp_roles.get(gid))}\n"
             f"Роль МП: {role_str(mp_roles.get(gid))}\n"
-            f"Роль реаки: {role_str(event_roles.get(gid))}\n"
+            f"Роль list: {role_str(event_roles.get(gid))}\n"
             f"Варн 1/3: {role_str(wr.get(1))}\n"
             f"Варн 2/3: {role_str(wr.get(2))}\n"
             f"Варн 3/3: {role_str(wr.get(3))}"
@@ -2249,9 +2249,9 @@ async def slash_settings(interaction: discord.Interaction):
     embed.add_field(
         name="🎯 Доступ к сборам",
         value=(
-            f"`!взп`: {roles_list_str('взп')}\n"
-            f"`!мп`: {roles_list_str('мп')}\n"
-            f"`!реаки`: {roles_list_str('реаки')}"
+            f"`!vzp`: {roles_list_str('vzp')}\n"
+            f"`!mp`: {roles_list_str('mp')}\n"
+            f"`!list`: {roles_list_str('list')}"
         ),
         inline=False,
     )
@@ -2330,9 +2330,9 @@ def build_cfg_main_embed(guild: discord.Guild) -> discord.Embed:
         f"Feedback: {_cs(guild, fs.get('log_channel_id'))}"
     ), inline=True)
     e.add_field(name="🎯 Сборы", value=(
-        f"ВЗП: {_ecr('взп')}\n"
-        f"МП: {_ecr('мп')}\n"
-        f"Реаки: {_ecr('реаки')}"
+        f"ВЗП: {_ecr('vzp')}\n"
+        f"МП: {_ecr('mp')}\n"
+        f"Реаки: {_ecr('list')}"
     ), inline=True)
     e.add_field(name="🔊 Войс / 🖼 Контент", value=(
         f"💎/мин: **{vs.get('amount', 10)}**\n"
@@ -2398,9 +2398,9 @@ def build_cfg_category_embed(guild: discord.Guild, category: str) -> discord.Emb
             return "\n".join(f"  • <@&{r}>" for r in ids) if ids else "  *только админ*"
         e.title = "🎯 Доступ к командам сбора"
         e.description = (
-            f"**!взп:**\n{_ecr('взп')}\n\n"
-            f"**!мп:**\n{_ecr('мп')}\n\n"
-            f"**!реаки:**\n{_ecr('реаки')}"
+            f"**!vzp:**\n{_ecr('vzp')}\n\n"
+            f"**!mp:**\n{_ecr('mp')}\n\n"
+            f"**!list:**\n{_ecr('list')}"
         )
     elif category in ("event_взп", "event_мп", "event_реаки"):
         etype = category.split("_", 1)[1]
@@ -2451,7 +2451,7 @@ class CfgCategorySelect(ui.Select):
             discord.SelectOption(label="🔑 Роли системы",  value="roles",   description="МП, ВЗП, Реаки, Магазин"),
             discord.SelectOption(label="⚠️ Варн-роли",     value="warns",   description="Роли за 1, 2, 3 предупреждения"),
             discord.SelectOption(label="📢 Каналы / Логи", value="logs",    description="Логи и feedback канал/роль"),
-            discord.SelectOption(label="🎯 Сборы",          value="events",  description="Доступ к !взп !мп !реаки"),
+            discord.SelectOption(label="🎯 Сборы",          value="events",  description="Доступ к !vzp !mp !list"),
             discord.SelectOption(label="🔊 Голосовые",      value="voice",   description="Баллы, категории, исключения"),
             discord.SelectOption(label="🖼 Контент",        value="content", description="Тексты, фото, ссылки панелей"),
         ]
@@ -2773,7 +2773,7 @@ class _CfgEventsView(ui.View):
         back.callback = _back
         self.add_item(back)
 
-        for label, etype in [("⚔️ ВЗП", "взп"), ("🏎 МП", "мп"), ("🎯 Реаки", "реаки")]:
+        for label, etype in [("⚔️ ВЗП", "vzp"), ("🏎 МП", "mp"), ("🎯 Реаки", "list")]:
             btn = _cfg_btn(label, style=discord.ButtonStyle.primary, row=1)
             async def _cb(inter, et=etype):
                 await inter.response.edit_message(

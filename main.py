@@ -4654,4 +4654,56 @@ async def slash_obshak_all(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
+# ─────────────────────────────────────────────
+# ТАБЛИЦА ЛИДЕРОВ
+# ─────────────────────────────────────────────
+
+@tree.command(name="топ", description="Таблица лидеров сервера")
+@app_commands.describe(категория="Выбери категорию: баллы, сообщения или войс")
+@app_commands.choices(категория=[
+    app_commands.Choice(name="💎 Баллы",         value="points"),
+    app_commands.Choice(name="💬 Сообщения",      value="messages"),
+    app_commands.Choice(name="🎙 Минуты в войсе", value="voice"),
+])
+async def slash_top(interaction: discord.Interaction, категория: str = "points"):
+    gid = interaction.guild_id
+
+    if категория == "points":
+        raw   = points_db.get(gid, {})
+        title = "💎 Топ по баллам"
+        label = "💎"
+    elif категория == "messages":
+        raw   = message_counts.get(gid, {})
+        title = "💬 Топ по сообщениям"
+        label = "сообщ."
+    else:
+        # Войс: сохранённые минуты + текущая сессия
+        raw = dict(voice_minutes.get(gid, {}))
+        for uid, join_t in voice_join_times.get(gid, {}).items():
+            extra = int((datetime.now() - join_t).total_seconds() // 60)
+            raw[uid] = raw.get(uid, 0) + extra
+        title = "🎙 Топ по минутам в войсе"
+        label = "мин."
+
+    sorted_data = sorted(raw.items(), key=lambda x: x[1], reverse=True)[:10]
+
+    if not sorted_data:
+        return await interaction.response.send_message("📊 Данных пока нет.", ephemeral=True)
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines  = []
+    for i, (uid, val) in enumerate(sorted_data):
+        medal = medals[i] if i < 3 else f"`{i+1}.`"
+        lines.append(f"{medal} <@{uid}> — **{val:,}** {label}".replace(",", "."))
+
+    embed = discord.Embed(
+        title=title,
+        description="\n".join(lines),
+        color=discord.Color.gold(),
+        timestamp=datetime.now(),
+    )
+    embed.set_footer(text="DIAMOND", icon_url=_footer(gid))
+    await interaction.response.send_message(embed=embed)
+
+
 bot.run(os.getenv("DISCORD_TOKEN"))

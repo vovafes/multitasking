@@ -515,6 +515,7 @@ def save_data():
         "cabinet_invite_links":  {str(g): v for g, v in cabinet_invite_links.items()},
         "message_counts":        {str(g): {str(u): v for u, v in us.items()} for g, us in message_counts.items()},
         "voice_minutes":         {str(g): {str(u): v for u, v in us.items()} for g, us in voice_minutes.items()},
+        "stats_panels":          {str(g): v for g, v in stats_panels.items()},
     }
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -645,6 +646,10 @@ def load_data():
             obshak_log_channels[int(g)] = v
         for g, v in data.get("obshak_deposits", {}).items():
             obshak_deposits[int(g)] = v
+
+        # Панели статистики GTA5RP
+        for g, v in data.get("stats_panels", {}).items():
+            stats_panels[int(g)] = v
 
         print("OK: Data loaded from data.json")
     except Exception as e:

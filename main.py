@@ -47,7 +47,8 @@ DEFAULT_TICKET_IMAGE = "https://i.imgur.com/umswh4i.gif"
 # ─────────────────────────────────────────────
 # ХРАНИЛИЩЕ
 # ─────────────────────────────────────────────
-DATA_FILE = "data.json"
+DATA_FILE   = "data.json"
+POINTS_FILE = "points.json"
 
 # { message_id: { "title": str, "max": int, "slots": {slot_num: user_id|None},
 #                 "image_url": str|None, "note": str|None, "channel_id": int,
@@ -368,7 +369,7 @@ def set_points(guild_id: int, user_id: int, amount: int):
     if guild_id not in points_db:
         points_db[guild_id] = {}
     points_db[guild_id][user_id] = amount
-    save_data()
+    save_points()
 
 
 def add_points(guild_id: int, user_id: int, amount: int):
@@ -521,6 +522,27 @@ def save_data():
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+def save_points():
+    """Сохраняет points_db в отдельный файл points.json."""
+    data = {str(g): {str(u): v for u, v in us.items()} for g, us in points_db.items()}
+    with open(POINTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def load_points():
+    """Загружает points_db из points.json (если есть)."""
+    global points_db
+    if not os.path.exists(POINTS_FILE):
+        return
+    try:
+        with open(POINTS_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        points_db = {int(g): {int(u): v for u, v in us.items()} for g, us in raw.items()}
+        print("OK: Points loaded from points.json")
+    except Exception as e:
+        print(f"WARNING: Failed to load points: {e}")
+
+
 def load_data():
     """Загружает данные с диска при старте."""
     global points_db, warns_db
@@ -530,10 +552,15 @@ def load_data():
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        points_db = {
-            int(g): {int(u): v for u, v in us.items()}
-            for g, us in data.get("points", {}).items()
-        }
+        # Баллы: загружаем из points.json (приоритет) или из data.json (миграция)
+        if os.path.exists(POINTS_FILE):
+            load_points()
+        elif data.get("points"):
+            points_db = {
+                int(g): {int(u): v for u, v in us.items()}
+                for g, us in data.get("points", {}).items()
+            }
+            save_points()  # мигрируем в отдельный файл
         for g, users in data.get("warns", {}).items():
             warns_db[int(g)] = {}
             for u, info in users.items():

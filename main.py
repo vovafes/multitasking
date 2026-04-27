@@ -3458,6 +3458,8 @@ async def on_ready():
         update_stats.start()
     if not voice_reward_loop.is_running():
         voice_reward_loop.start()
+    if not afk_expire_loop.is_running():
+        afk_expire_loop.start()
 
 
 # ─────────────────────────────────────────────
@@ -4652,6 +4654,29 @@ async def slash_obshak_all(interaction: discord.Interaction):
         "📊 Общак — Всё время", "С начала ведения учёта",
     )
     await interaction.response.send_message(embed=embed)
+
+
+# ─────────────────────────────────────────────
+# ТАЙМЕР АФК — авто-удаление по времени HH:MM
+# ─────────────────────────────────────────────
+
+@tasks.loop(minutes=1)
+async def afk_expire_loop():
+    """Каждую минуту проверяет AFK-список и удаляет тех, чьё время вернуться наступило."""
+    now_str = datetime.now().strftime("%H:%M")
+    for guild_id, users in list(afk_list.items()):
+        expired = [
+            uid for uid, data in users.items()
+            if data.get("return_time", "").strip() == now_str
+        ]
+        if not expired:
+            continue
+        for uid in expired:
+            afk_list[guild_id].pop(uid, None)
+        save_data()
+        guild = bot.get_guild(guild_id)
+        if guild:
+            await refresh_afk_message(guild)
 
 
 # ─────────────────────────────────────────────

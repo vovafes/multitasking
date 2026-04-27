@@ -1294,15 +1294,31 @@ class ShopItemButton(ui.Button):
             if not warn_data:
                 return await interaction.response.send_message("✅ У вас нет варнов для снятия!", ephemeral=True)
             guild_warn_roles = warn_roles.get(guild_id, {})
+            old_count = warn_data["warns"]
+            new_count = old_count - 1
+            # Всегда снимаем все варн-роли сначала
             roles_to_remove = [interaction.guild.get_role(rid) for rid in guild_warn_roles.values()]
             try:
                 await interaction.user.remove_roles(*[r for r in roles_to_remove if r], reason="Покупка: снятие варна")
             except Exception:
                 pass
-            remove_warn(guild_id, user_id)
+            if new_count <= 0:
+                # Варнов больше нет — удаляем запись
+                remove_warn(guild_id, user_id)
+                desc = f"Ваш последний варн снят!\nСписано **{price}** 💎"
+            else:
+                # Уменьшаем на 1 и выдаём нужную роль
+                set_warn(guild_id, user_id, new_count, warn_data.get("reason", ""), warn_data.get("moderator", 0))
+                new_role = interaction.guild.get_role(guild_warn_roles.get(new_count))
+                if new_role:
+                    try:
+                        await interaction.user.add_roles(new_role, reason=f"Покупка: снятие варна ({new_count}/3)")
+                    except Exception:
+                        pass
+                desc = f"Варн снят! Теперь у вас **{new_count}/3**\nСписано **{price}** 💎"
             add_points(guild_id, user_id, -price)
             await _log_shop_purchase(interaction, item, price, action="remove_warn")
-            embed = discord.Embed(title="✅ Варн снят!", description=f"Списано **{price}** 💎", color=discord.Color.green(), timestamp=datetime.now())
+            embed = discord.Embed(title="✅ Варн снят!", description=desc, color=discord.Color.green(), timestamp=datetime.now())
             embed.set_footer(text="DIAMOND", icon_url=_footer(guild_id))
             return await interaction.response.send_message(embed=embed, ephemeral=True)
 

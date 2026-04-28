@@ -871,6 +871,9 @@ class RejectModal(ui.Modal, title="❌ Причина отклонения"):
         reason = str(self.reason)
 
         old_embed = self.original_message.embeds[0]
+        if any(f.name in ("❌ Статус", "✅ Статус") for f in old_embed.fields):
+            return await interaction.response.send_message("❌ Заявка уже была обработана.", ephemeral=True)
+
         new_embed = old_embed.copy()
         new_embed.color = discord.Color.red()
         new_embed.add_field(
@@ -1128,6 +1131,9 @@ class ApplicationReviewView(ui.View):
         applicant_id = self._get_applicant_id(interaction.message)
 
         old_embed = interaction.message.embeds[0]
+        if any(f.name in ("❌ Статус", "✅ Статус") for f in old_embed.fields):
+            return await interaction.followup.send("❌ Заявка уже была обработана.", ephemeral=True)
+
         new_embed = old_embed.copy()
         new_embed.color = discord.Color.green()
         new_embed.add_field(

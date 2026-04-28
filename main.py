@@ -1542,13 +1542,13 @@ async def set_mp_role(ctx, роль: discord.Role):
 
 @tree.command(name="доступ_сбора", description="Добавить роль с доступом к команде сбора")
 @app_commands.describe(
-    тип="Тип сбора: vzp, mp или list",
+    тип="Тип сбора: взп, мп или реаки",
     роль="Роль, которая получит доступ к команде"
 )
 @app_commands.choices(тип=[
-    app_commands.Choice(name="vzp", value="vzp"),
-    app_commands.Choice(name="mp", value="mp"),
-    app_commands.Choice(name="list", value="list"),
+    app_commands.Choice(name="взп", value="взп"),
+    app_commands.Choice(name="мп", value="мп"),
+    app_commands.Choice(name="реаки", value="реаки"),
 ])
 async def slash_event_access_add(interaction: discord.Interaction, тип: str, роль: discord.Role):
     if not is_admin(interaction):
@@ -1570,13 +1570,13 @@ async def slash_event_access_add(interaction: discord.Interaction, тип: str, 
 
 @tree.command(name="убрать_доступ_сбора", description="Убрать роль из доступа к команде сбора")
 @app_commands.describe(
-    тип="Тип сбора: vzp, mp или list",
+    тип="Тип сбора: взп, мп или реаки",
     роль="Роль, которую убрать"
 )
 @app_commands.choices(тип=[
-    app_commands.Choice(name="vzp", value="vzp"),
-    app_commands.Choice(name="mp", value="mp"),
-    app_commands.Choice(name="list", value="list"),
+    app_commands.Choice(name="взп", value="взп"),
+    app_commands.Choice(name="мп", value="мп"),
+    app_commands.Choice(name="реаки", value="реаки"),
 ])
 async def slash_event_access_remove(interaction: discord.Interaction, тип: str, роль: discord.Role):
     if not is_admin(interaction):

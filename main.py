@@ -924,14 +924,15 @@ class RejectModal(ui.Modal, title="❌ Причина отклонения"):
                 except Exception:
                     pass
 
-        await interaction.response.send_message(
-            "✅ Заявка отклонена. Канал закроется через 10 секунд.", ephemeral=True
+        await interaction.response.send_message("✅ Заявка отклонена.", ephemeral=True)
+        close_embed = discord.Embed(
+            title="🔒 Тикет закрыт",
+            description=f"Заявка **отклонена** — {interaction.user.mention}\nВыберите следующее действие:",
+            color=discord.Color.red(),
+            timestamp=datetime.now(),
         )
-        await asyncio.sleep(10)
-        try:
-            await self.channel.delete(reason="Заявка отклонена")
-        except Exception:
-            pass
+        close_embed.set_footer(text=f"DIAMOND • {self.applicant_id}", icon_url=_footer(interaction.guild_id))
+        await self.channel.send(embed=close_embed, view=PostCloseView())
 
 
 class ApplicationModal(ui.Modal, title="📋 Подать заявку"):
@@ -1189,14 +1190,15 @@ class ApplicationReviewView(ui.View):
                 except Exception:
                     pass
 
-        await interaction.followup.send(
-            "✅ Заявка одобрена. Канал закроется через 10 секунд.", ephemeral=True
+        await interaction.followup.send("✅ Заявка одобрена.", ephemeral=True)
+        close_embed = discord.Embed(
+            title="🔒 Тикет закрыт",
+            description=f"Заявка **одобрена** — {interaction.user.mention}\nВыберите следующее действие:",
+            color=discord.Color.green(),
+            timestamp=datetime.now(),
         )
-        await asyncio.sleep(10)
-        try:
-            await channel.delete(reason="Заявка одобрена")
-        except Exception:
-            pass
+        close_embed.set_footer(text=f"DIAMOND • {applicant_id}", icon_url=_footer(interaction.guild_id))
+        await channel.send(embed=close_embed, view=PostCloseView())
 
     @ui.button(label="❌ Отклонить", style=discord.ButtonStyle.danger, custom_id="ticket_reject")
     async def reject(self, interaction: discord.Interaction, button: ui.Button):
@@ -1204,6 +1206,49 @@ class ApplicationReviewView(ui.View):
             return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
         applicant_id = self._get_applicant_id(interaction.message)
         await interaction.response.send_modal(RejectModal(applicant_id, interaction.message, interaction.channel))
+
+
+# ─────────────────────────────────────────────
+# ТИКЕТ — ПОСТ-ЗАКРЫТИЕ (Reopen / Delete)
+# ─────────────────────────────────────────────
+class PostCloseView(ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    def _get_applicant_id(self, message: discord.Message) -> int:
+        """Читает applicant_id из footer вида 'DIAMOND • 123456'."""
+        try:
+            return int(message.embeds[0].footer.text.split("• ")[-1].strip())
+        except Exception:
+            return 0
+
+    @ui.button(label="🔓 Открыть тикет", style=discord.ButtonStyle.success, custom_id="ticket_reopen")
+    async def reopen(self, interaction: discord.Interaction, button: ui.Button):
+        if not is_ticket_manager(interaction):
+            return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+        applicant_id = self._get_applicant_id(interaction.message)
+        await interaction.message.delete()
+        view = ApplicationReviewView(applicant_id)
+        reopen_embed = discord.Embed(
+            title="🔓 Тикет переоткрыт",
+            description=f"Переоткрыт — {interaction.user.mention}",
+            color=discord.Color.yellow(),
+            timestamp=datetime.now(),
+        )
+        reopen_embed.set_footer(text="DIAMOND", icon_url=_footer(interaction.guild_id))
+        await interaction.channel.send(embed=reopen_embed, view=view)
+        await interaction.response.send_message("✅ Тикет переоткрыт.", ephemeral=True)
+
+    @ui.button(label="🗑️ Удалить канал", style=discord.ButtonStyle.danger, custom_id="ticket_delete_channel")
+    async def delete_channel(self, interaction: discord.Interaction, button: ui.Button):
+        if not is_ticket_manager(interaction):
+            return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+        await interaction.response.send_message("🗑️ Канал удаляется...", ephemeral=True)
+        await asyncio.sleep(3)
+        try:
+            await interaction.channel.delete(reason=f"Тикет удалён — {interaction.user}")
+        except Exception:
+            pass
 
 
 # ─────────────────────────────────────────────
@@ -3529,6 +3574,7 @@ async def on_ready():
     bot.add_view(InactiveView())
     bot.add_view(PrivateVCView())
     bot.add_view(ApplicationReviewView())
+    bot.add_view(PostCloseView())
     bot.add_view(ContractPanelView())
     bot.add_view(ActiveContractView(0))
     bot.add_view(FeedbackPanelView())

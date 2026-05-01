@@ -1227,6 +1227,7 @@ class PostCloseView(ui.View):
         if not is_ticket_manager(interaction):
             return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
         applicant_id = self._get_applicant_id(interaction.message)
+        await interaction.response.defer(ephemeral=True)
         await interaction.message.delete()
         view = ApplicationReviewView(applicant_id)
         reopen_embed = discord.Embed(
@@ -1237,13 +1238,13 @@ class PostCloseView(ui.View):
         )
         reopen_embed.set_footer(text="DIAMOND", icon_url=_footer(interaction.guild_id))
         await interaction.channel.send(embed=reopen_embed, view=view)
-        await interaction.response.send_message("✅ Тикет переоткрыт.", ephemeral=True)
+        await interaction.followup.send("✅ Тикет переоткрыт.", ephemeral=True)
 
     @ui.button(label="🗑️ Удалить канал", style=discord.ButtonStyle.danger, custom_id="ticket_delete_channel")
     async def delete_channel(self, interaction: discord.Interaction, button: ui.Button):
         if not is_ticket_manager(interaction):
             return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
-        await interaction.response.send_message("🗑️ Канал удаляется...", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
         await asyncio.sleep(3)
         try:
             await interaction.channel.delete(reason=f"Тикет удалён — {interaction.user}")

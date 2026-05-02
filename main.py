@@ -876,11 +876,12 @@ class RejectModal(ui.Modal, title="❌ Причина отклонения"):
         self.channel          = channel
 
     async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         reason = str(self.reason)
 
         old_embed = self.original_message.embeds[0]
         if any(f.name in ("❌ Статус", "✅ Статус") for f in old_embed.fields):
-            return await interaction.response.send_message("❌ Заявка уже была обработана.", ephemeral=True)
+            return await interaction.followup.send("❌ Заявка уже была обработана.", ephemeral=True)
 
         new_embed = old_embed.copy()
         new_embed.color = discord.Color.red()
@@ -924,7 +925,7 @@ class RejectModal(ui.Modal, title="❌ Причина отклонения"):
                 except Exception:
                     pass
 
-        await interaction.response.send_message("✅ Заявка отклонена.", ephemeral=True)
+        await interaction.followup.send("✅ Заявка отклонена.", ephemeral=True)
         close_embed = discord.Embed(
             title="🔒 Тикет закрыт",
             description=f"Заявка **отклонена** — {interaction.user.mention}\nВыберите следующее действие:",

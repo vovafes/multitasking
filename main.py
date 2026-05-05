@@ -836,18 +836,33 @@ class JoinEventView(ui.View):
 # ─────────────────────────────────────────────
 class AfkModal(ui.Modal, title="🕐 Уход в АФК"):
     reason      = ui.TextInput(label="Причина", placeholder="На работе / Учёба / Дела...", required=True)
-    return_time = ui.TextInput(label="Вернусь в (например 18:30)", placeholder="18:30", required=True)
+    return_time = ui.TextInput(label="Вернусь (дата и время, например 25.05 18:30)", placeholder="25.05 18:30", required=True)
 
     async def on_submit(self, interaction: discord.Interaction):
         guild_id = interaction.guild_id
         user_id  = interaction.user.id
+
+        raw = str(self.return_time).strip()
+        import re as _re
+        m = _re.match(r"^(\d{2})\.(\d{2})\s+(\d{2}):(\d{2})$", raw)
+        if not m:
+            return await interaction.response.send_message(
+                "⚠️ Неверный формат времени. Используй формат **ДД.ММ ЧЧ:ММ**, например `25.05 18:30`",
+                ephemeral=True,
+            )
+        day, mon, hour, minute = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+        if not (1 <= mon <= 12 and 1 <= day <= 31 and 0 <= hour <= 23 and 0 <= minute <= 59):
+            return await interaction.response.send_message(
+                "⚠️ Некорректная дата или время. Проверь, что день, месяц, часы и минуты указаны правильно.",
+                ephemeral=True,
+            )
 
         if guild_id not in afk_list:
             afk_list[guild_id] = {}
 
         afk_list[guild_id][user_id] = {
             "reason":      str(self.reason),
-            "return_time": str(self.return_time),
+            "return_time": raw,
             "since":       datetime.now(),
         }
         save_data()
@@ -858,7 +873,7 @@ class AfkModal(ui.Modal, title="🕐 Уход в АФК"):
             description=(
                 f"🕐 Вы добавлены в АФК-список\n"
                 f"**Причина:** {self.reason}\n"
-                f"**Вернусь в:** `{self.return_time}`"
+                f"**Вернусь в:** `{raw}`"
             ),
             color=discord.Color.blurple(),
         )
@@ -1052,18 +1067,33 @@ class AfkView(ui.View):
 
 class InactiveModal(ui.Modal, title="📅 Уход в инактив"):
     reason      = ui.TextInput(label="Причина", placeholder="Отпуск / Работа / Дела...", required=True)
-    return_date = ui.TextInput(label="Вернусь (например 25.04.2026)", placeholder="25.04.2026", required=True)
+    return_date = ui.TextInput(label="Вернусь (дата, например 25.04.2026)", placeholder="25.04.2026", required=True)
 
     async def on_submit(self, interaction: discord.Interaction):
         guild_id = interaction.guild_id
         user_id  = interaction.user.id
+
+        raw = str(self.return_date).strip()
+        import re as _re
+        m = _re.match(r"^(\d{2})\.(\d{2})\.(\d{4})$", raw)
+        if not m:
+            return await interaction.response.send_message(
+                "⚠️ Неверный формат даты. Используй формат **ДД.ММ.ГГГГ**, например `25.04.2026`",
+                ephemeral=True,
+            )
+        day, mon, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if not (1 <= mon <= 12 and 1 <= day <= 31 and year >= 2020):
+            return await interaction.response.send_message(
+                "⚠️ Некорректная дата. Проверь, что день и месяц указаны правильно.",
+                ephemeral=True,
+            )
 
         if guild_id not in inactive_list:
             inactive_list[guild_id] = {}
 
         inactive_list[guild_id][user_id] = {
             "reason":      str(self.reason),
-            "return_date": str(self.return_date),
+            "return_date": raw,
             "since":       datetime.now(),
         }
         save_data()
@@ -1074,7 +1104,7 @@ class InactiveModal(ui.Modal, title="📅 Уход в инактив"):
             description=(
                 f"📅 Вы добавлены в список инактива\n"
                 f"**Причина:** {self.reason}\n"
-                f"**Вернусь:** `{self.return_date}`"
+                f"**Вернусь:** `{raw}`"
             ),
             color=discord.Color.orange(),
         )
@@ -3612,10 +3642,10 @@ RAGEMP_API = "https://cdn.rage.mp/master/"
 stats_panels: dict = {}
 
 SERVER_ORDER = [
-    "Downtown", "Strawberry", "VineWood", "Blackberry", "Insquad",
+    "Downtown", "Strawberry", "VineWood", "Rockford", "Blackberry", "Insquad",
     "Sunrise", "Rainbow", "Richman", "Eclipse", "La Mesa", "Burton",
-    "Rockford", "Alta", "Del Perro", "Davis", "Harmony", "Redwood",
-    "Hawick", "Grapeseed", "Murrieta", "Vespucci", "Milton", "La Puerta",
+    "Alta", "Del Perro", "Davis", "Harmony", "Redwood",
+    "Grapeseed", "Hawick", "Murrieta", "Vespucci", "Milton", "La Puerta",
 ]
 _SERVER_ORDER_LOWER = {name.lower(): i for i, name in enumerate(SERVER_ORDER)}
 

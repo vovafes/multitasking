@@ -306,6 +306,83 @@ def build_thread_list(title: str, max_count: int, slots: dict) -> str:
     return "\n".join(lines)
 
 
+class KickModal(ui.Modal, title="Кикнуть из списка"):
+    user_id = ui.TextInput(
+        label="ID пользователя",
+        placeholder="Вставь Discord ID (например: 123456789012345678)",
+        min_length=17,
+        max_length=20,
+    )
+
+    def __init__(self, message_id: int):
+        super().__init__()
+        self.message_id = message_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not is_admin(interaction):
+            return await interaction.response.send_message("❌ Нет прав!", ephemeral=True)
+
+        try:
+            target_id = int(str(self.user_id).strip())
+        except ValueError:
+            return await interaction.response.send_message("❌ Некорректный ID!", ephemeral=True)
+
+        data = event_lists.get(self.message_id)
+        if not data:
+            return await interaction.response.send_message("❌ Сбор не найден!", ephemeral=True)
+
+        slots = data["slots"]
+        for slot_num, uid in slots.items():
+            if uid == target_id:
+                slots[slot_num] = None
+                save_data()
+
+                # Обновить основное сообщение
+                try:
+                    channel = bot.get_channel(data["channel_id"])
+                    orig_msg = await channel.fetch_message(self.message_id)
+                    join_mode = data.get("mode") == "join"
+                    embed = build_event_embed(
+                        interaction.guild_id, data["title"], data["max"], slots,
+                        data.get("image_url"), data.get("note"), join_mode=join_mode
+                    )
+                    view = JoinEventView(self.message_id) if join_mode else EventView(self.message_id)
+                    await orig_msg.edit(embed=embed, view=view)
+                except Exception:
+                    pass
+
+                await update_thread_list(self.message_id)
+                return await interaction.response.send_message(
+                    f"✅ <@{target_id}> убран из слота **{slot_num}**", ephemeral=True
+                )
+
+        await interaction.response.send_message(
+            f"❌ Пользователь `{target_id}` не найден в списке!", ephemeral=True
+        )
+
+
+class KickButton(ui.Button):
+    def __init__(self, message_id: int):
+        super().__init__(
+            label="Кикнуть",
+            emoji="❌",
+            style=discord.ButtonStyle.danger,
+            custom_id=f"kick_from_list_{message_id}",
+        )
+        self.message_id = message_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if not is_admin(interaction):
+            return await interaction.response.send_message("❌ Только для администраторов!", ephemeral=True)
+        await interaction.response.send_modal(KickModal(self.message_id))
+
+
+class ThreadListView(ui.View):
+    def __init__(self, message_id: int):
+        super().__init__(timeout=None)
+        self.add_item(KickButton(message_id))
+
+
 async def update_thread_list(message_id: int):
     data = event_lists.get(message_id)
     if not data or not data.get("thread_msg_id"):
@@ -315,7 +392,10 @@ async def update_thread_list(message_id: int):
         if not thread:
             return
         msg = await thread.fetch_message(data["thread_msg_id"])
-        await msg.edit(content=build_thread_list(data["title"], data["max"], data["slots"]))
+        await msg.edit(
+            content=build_thread_list(data["title"], data["max"], data["slots"]),
+            view=ThreadListView(message_id),
+        )
     except Exception:
         pass
 
@@ -1518,7 +1598,7 @@ async def _create_event_message(channel, guild, title: str, max_count: int, imag
         )
         thread_embed.set_footer(text="DIAMOND", icon_url=_footer(guild.id))
         await thread.send(embed=thread_embed)
-        list_msg = await thread.send(build_thread_list(title, max_count, slots))
+        list_msg = await thread.send(build_thread_list(title, max_count, slots), view=ThreadListView(msg.id))
         event_lists[msg.id]["thread_id"]     = thread.id
         event_lists[msg.id]["thread_msg_id"] = list_msg.id
     except Exception:
@@ -3625,6 +3705,8 @@ async def on_ready():
         cat_id = panel.get("category_id")
         if cat_id:
             bot.add_view(TicketPanelView(cat_id))
+    for message_id in event_lists:
+        bot.add_view(ThreadListView(message_id))
     await tree.sync()
     print(f"Bot online: {bot.user} (ID: {bot.user.id})")
     await bot.change_presence(activity=discord.Activity(

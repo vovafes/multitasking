@@ -8,7 +8,14 @@ import asyncio
 import re
 import aiohttp
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+MSK = timezone(timedelta(hours=3))  # Московское время (UTC+3)
+
+
+def now_msk() -> datetime:
+    """Текущее время по МСК."""
+    return datetime.now(MSK).replace(tzinfo=None)
 
 load_dotenv()
 
@@ -863,7 +870,7 @@ class AfkModal(ui.Modal, title="🕐 Уход в АФК"):
         afk_list[guild_id][user_id] = {
             "reason":      str(self.reason),
             "return_time": raw,
-            "since":       datetime.now(),
+            "since":       now_msk(),
         }
         save_data()
 
@@ -4832,12 +4839,13 @@ async def slash_obshak_all(interaction: discord.Interaction):
 
 @tasks.loop(minutes=1)
 async def afk_expire_loop():
-    """Каждую минуту проверяет AFK-список и удаляет тех, чьё время вернуться наступило."""
-    now_str = datetime.now().strftime("%H:%M")
+    """Каждую минуту проверяет AFK-список и удаляет тех, чьё время вернуться наступило (МСК)."""
+    now_msk_dt = now_msk()
+    now_date_time = now_msk_dt.strftime("%d.%m %H:%M")  # формат как в return_time: "25.05 18:30"
     for guild_id, users in list(afk_list.items()):
         expired = [
             uid for uid, data in users.items()
-            if data.get("return_time", "").strip() == now_str
+            if data.get("return_time", "").strip() == now_date_time
         ]
         if not expired:
             continue

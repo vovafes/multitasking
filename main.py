@@ -6,6 +6,7 @@ import io
 import json
 import asyncio
 import re
+import random
 import aiohttp
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
@@ -54,8 +55,9 @@ DEFAULT_TICKET_IMAGE = "https://i.imgur.com/umswh4i.gif"
 # ─────────────────────────────────────────────
 # ХРАНИЛИЩЕ
 # ─────────────────────────────────────────────
-DATA_FILE   = "data.json"
-POINTS_FILE = "points.json"
+DATA_FILE     = "data.json"
+POINTS_FILE   = "points.json"
+ROULETTE_FILE = "roulette.json"
 
 # { message_id: { "title": str, "max": int, "slots": {slot_num: user_id|None},
 #                 "image_url": str|None, "note": str|None, "channel_id": int,
@@ -201,8 +203,21 @@ obshak_panels: dict = {}
 # { guild_id: channel_id }
 obshak_log_channels: dict = {}
 
+# { guild_id: role_id }  — роль для тега в логах общака
+obshak_ping_roles: dict = {}
+
 # { guild_id: [ { "user_id": int, "amount": int, "date": str (ISO) } ] }
 obshak_deposits: dict = {}
+
+# ─────────────────────────────────────────────
+# 📋 СОСТАВ СЕМЬИ
+# ─────────────────────────────────────────────
+# { guild_id: { "member_role_id": int, "academy_role_id": int,
+#               "access_role_ids": [int, ...], "channel_id": int, "message_id": int } }
+roster_settings: dict = {}
+
+# { guild_id: { user_id: { "in_org": bool, "faction": str|None } } }
+roster_members: dict = {}
 
 
 # ─────────────────────────────────────────────
@@ -663,7 +678,10 @@ def save_data():
         "feedback_settings":    {str(g): v for g, v in feedback_settings.items()},
         "obshak_panels":        {str(g): v for g, v in obshak_panels.items()},
         "obshak_log_channels":  {str(g): v for g, v in obshak_log_channels.items()},
+        "obshak_ping_roles":    {str(g): v for g, v in obshak_ping_roles.items()},
         "obshak_deposits":      {str(g): v for g, v in obshak_deposits.items()},
+        "roster_settings":      {str(g): v for g, v in roster_settings.items()},
+        "roster_members":       {str(g): {str(u): v for u, v in um.items()} for g, um in roster_members.items()},
         "voice_reward_settings": {str(g): v for g, v in voice_reward_settings.items()},
         "cabinet_panels":        {str(g): v for g, v in cabinet_panels.items()},
         "cabinet_invite_links":  {str(g): v for g, v in cabinet_invite_links.items()},
@@ -838,8 +856,14 @@ def load_data():
             obshak_panels[int(g)] = v
         for g, v in data.get("obshak_log_channels", {}).items():
             obshak_log_channels[int(g)] = v
+        for g, v in data.get("obshak_ping_roles", {}).items():
+            obshak_ping_roles[int(g)] = v
         for g, v in data.get("obshak_deposits", {}).items():
             obshak_deposits[int(g)] = v
+        for g, v in data.get("roster_settings", {}).items():
+            roster_settings[int(g)] = v
+        for g, um in data.get("roster_members", {}).items():
+            roster_members[int(g)] = {int(u): v for u, v in um.items()}
 
         # Панели статистики GTA5RP
         for g, v in data.get("stats_panels", {}).items():
@@ -3886,6 +3910,7 @@ async def slash_private_vc(
 @bot.event
 async def on_ready():
     load_data()
+    load_roulette()
     bot.add_view(AfkView())
     bot.add_view(InactiveView())
     bot.add_view(PrivateVCView())
@@ -3916,6 +3941,10 @@ async def on_ready():
         voice_reward_loop.start()
     if not afk_expire_loop.is_running():
         afk_expire_loop.start()
+    for gid in list(roster_settings.keys()):
+        guild = bot.get_guild(gid)
+        if guild:
+            await _refresh_roster(guild)
 
 
 # ─────────────────────────────────────────────
@@ -4919,8 +4948,10 @@ class ObshakDepositModal(ui.Modal, title="Пополнение общака"):
             log_ch = interaction.guild.get_channel(log_ch_id)
             if log_ch:
                 try:
+                    ping_role_id = obshak_ping_roles.get(guild_id)
+                    ping_str = f"<@&{ping_role_id}>\n" if ping_role_id else ""
                     await log_ch.send(
-                        f"[+{format_amount(amount)}$] {interaction.user.mention} пополнил баланс организации"
+                        f"{ping_str}[+{format_amount(amount)}$] {interaction.user.mention} пополнил баланс организации"
                     )
                 except Exception:
                     pass
@@ -5014,6 +5045,23 @@ async def slash_obshak_logs(interaction: discord.Interaction, канал: discor
     await interaction.response.send_message(
         f"✅ Логи пополнений общака будут отправляться в {канал.mention}.", ephemeral=True
     )
+
+
+@tree.command(name="общак_пинг", description="Роль для тега в логах пополнений общака")
+@app_commands.describe(роль="Роль которую тегать при каждом пополнении (None — убрать тег)")
+async def slash_obshak_ping(interaction: discord.Interaction, роль: discord.Role = None):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+    if роль:
+        obshak_ping_roles[interaction.guild_id] = роль.id
+        save_data()
+        await interaction.response.send_message(
+            f"✅ При каждом пополнении будет тегаться {роль.mention}.", ephemeral=True
+        )
+    else:
+        obshak_ping_roles.pop(interaction.guild_id, None)
+        save_data()
+        await interaction.response.send_message("✅ Тег роли в логах общака убран.", ephemeral=True)
 
 
 def _build_obshak_stats_embed(
@@ -5185,6 +5233,581 @@ async def slash_top(interaction: discord.Interaction, категория: str = 
         timestamp=datetime.now(),
     )
     embed.set_footer(text="DIAMOND", icon_url=_footer(gid))
+    await interaction.response.send_message(embed=embed)
+
+
+# ═══════════════════════════════════════════════════════════════
+# 📋 СИСТЕМА СОСТАВА СЕМЬИ
+# ═══════════════════════════════════════════════════════════════
+
+FACTIONS = {
+    "LSV":   ("Los Santos Vagos",               "🟡"),
+    "BSG":   ("Bloods Street Gang",             "🔴"),
+    "MG13":  ("Marabunta Grande 13",            "🟣"),
+    "WSF":   ("West Side Front",                "🟢"),
+    "ESB":   ("East Side Ballas",               "🟠"),
+    "LSSD":  ("Sheriff Department",             "🛡️"),
+    "LSPD":  ("Police Department",              "🚔"),
+    "FIB":   ("Federal Investigation Bureau",   "🕵️"),
+    "GOV":   ("Government",                     "🏛️"),
+    "EMS":   ("Emergency Medical Services",     "🚑"),
+    "SASPA": ("San Andreas State Prison Authority", "⛓️"),
+    "ARMY":  ("San Andreas National Guard",     "🪖"),
+    "MEX":   ("Mexican Mafia",                  "🌵"),
+    "LCN":   ("La Cosa Nostra",                 "🤌"),
+    "RM":    ("Russian Mafia",                  "🐻"),
+    "ARM":   ("Armenian Mafia",                 "⚔️"),
+    "YAK":   ("Yakuza",                         "🗡️"),
+}
+NO_FACTION_KEY = "none"
+
+
+def _faction_display(guild: discord.Guild, faction_key: str | None) -> str:
+    if not faction_key or faction_key == NO_FACTION_KEY:
+        afk_emoji = discord.utils.get(guild.emojis, name="afk")
+        prefix = str(afk_emoji) + " " if afk_emoji else "😴 "
+        return f"{prefix}Без фракции"
+    entry = FACTIONS.get(faction_key)
+    if not entry:
+        return faction_key
+    full, default_emoji = entry
+    custom = discord.utils.get(guild.emojis, name=faction_key)
+    prefix = (str(custom) + " ") if custom else (default_emoji + " ")
+    return f"{prefix}{full}"
+
+
+def _has_roster_access(interaction: discord.Interaction) -> bool:
+    if is_admin(interaction):
+        return True
+    cfg = roster_settings.get(interaction.guild_id, {})
+    access_ids = set(cfg.get("access_role_ids", []))
+    return any(r.id in access_ids for r in interaction.user.roles)
+
+
+def _chunk_lines(lines: list, chunk_size: int = 10) -> list[list]:
+    if not lines:
+        return [[]]
+    return [lines[i:i+chunk_size] for i in range(0, len(lines), chunk_size)]
+
+
+async def _collect_roster_lines(guild: discord.Guild):
+    cfg             = roster_settings.get(guild.id, {})
+    member_role_id  = cfg.get("member_role_id")
+    academy_role_id = cfg.get("academy_role_id")
+
+    members_list = guild.members
+    if len(members_list) < 2:
+        try:
+            members_list = [m async for m in guild.fetch_members(limit=None)]
+        except Exception:
+            members_list = guild.members
+
+    members_data  = roster_members.get(guild.id, {})
+    full_lines    = []
+    academy_lines = []
+
+    for member in members_list:
+        if member.bot:
+            continue
+        role_ids    = {r.id for r in member.roles}
+        has_member  = member_role_id  and (member_role_id  in role_ids)
+        has_academy = academy_role_id and (academy_role_id in role_ids)
+        if not has_member and not has_academy:
+            continue
+
+        ud       = members_data.get(member.id, {})
+        in_org   = ud.get("in_org", False)
+        faction  = ud.get("faction", None)
+        org_icon = "✅" if in_org else "❌"
+        frac_str = _faction_display(guild, faction)
+        line     = f"• {member.mention}\n  Организация: {org_icon} | {frac_str}"
+
+        if has_academy and not has_member:
+            academy_lines.append(line)
+        else:
+            full_lines.append(line)
+
+    return full_lines, academy_lines
+
+
+async def _refresh_roster(guild: discord.Guild):
+    cfg   = roster_settings.get(guild.id, {})
+    ch_id = cfg.get("channel_id")
+    if not ch_id:
+        return
+    try:
+        ch = guild.get_channel(ch_id)
+        old_id = cfg.get("message_id")
+        if old_id:
+            try:
+                await (await ch.fetch_message(old_id)).delete()
+            except Exception:
+                pass
+        full_lines, academy_lines = await _collect_roster_lines(guild)
+        view = RosterPaginationView(guild, full_lines, academy_lines)
+        msg  = await ch.send(embed=view.current_embed(), view=view)
+        cfg["message_id"] = msg.id
+        save_data()
+    except Exception:
+        pass
+
+
+class RosterPaginationView(ui.View):
+    PAGE = 10
+
+    def __init__(self, guild: discord.Guild, full_lines: list, academy_lines: list, idx: int = 0):
+        super().__init__(timeout=None)
+        self.guild         = guild
+        self.full_lines    = full_lines
+        self.academy_lines = academy_lines
+        self.full_pages    = _chunk_lines(full_lines,    self.PAGE)
+        self.acad_pages    = _chunk_lines(academy_lines, self.PAGE)
+        self.total         = len(self.full_pages) + len(self.acad_pages)
+        self.idx           = max(0, min(idx, self.total - 1))
+        self.add_item(RosterOrgSelect())
+        self.add_item(RosterFracUserSelect())
+        self._add_nav()
+
+    def _add_nav(self):
+        for item in list(self.children):
+            if isinstance(item, ui.Button):
+                self.remove_item(item)
+        fp = len(self.full_pages)
+        ap = len(self.acad_pages)
+        if self.idx < fp:
+            counter = f"{self.idx + 1} / {fp}  (Участники)" if fp > 1 else "Участники"
+        else:
+            ai = self.idx - fp
+            counter = f"{ai + 1} / {ap}  (Академия)" if ap > 1 else "Академия"
+
+        prev_btn = ui.Button(label="◀ Назад",   style=discord.ButtonStyle.secondary, disabled=self.idx == 0, row=2)
+        page_btn = ui.Button(label=counter,      style=discord.ButtonStyle.primary,   disabled=True,          row=2)
+        next_btn = ui.Button(label="Вперёд ▶",  style=discord.ButtonStyle.secondary, disabled=self.idx >= self.total - 1, row=2)
+        prev_btn.callback = self._go_prev
+        next_btn.callback = self._go_next
+        self.add_item(prev_btn)
+        self.add_item(page_btn)
+        self.add_item(next_btn)
+
+    def current_embed(self) -> discord.Embed:
+        footer_icon = _footer(self.guild.id)
+        fp = len(self.full_pages)
+        if self.idx < fp:
+            page  = self.full_pages[self.idx]
+            title = f"🏅 Участники  [{len(self.full_lines)}]"
+            color = discord.Color.dark_gold()
+            empty = "*Нет участников*"
+        else:
+            ai    = self.idx - fp
+            page  = self.acad_pages[ai]
+            title = f"🎓 Академия  [{len(self.academy_lines)}]"
+            color = discord.Color.blue()
+            empty = "*Нет академиков*"
+        embed = discord.Embed(
+            title=title,
+            description="\n\n".join(page) if page else empty,
+            color=color,
+            timestamp=datetime.now(),
+        )
+        embed.set_footer(
+            text=f"DIAMOND • Участников: {len(self.full_lines)} | Академиков: {len(self.academy_lines)}",
+            icon_url=footer_icon,
+        )
+        return embed
+
+    async def _go_prev(self, interaction: discord.Interaction):
+        self.idx = max(0, self.idx - 1)
+        self._add_nav()
+        await interaction.response.edit_message(embed=self.current_embed(), view=self)
+
+    async def _go_next(self, interaction: discord.Interaction):
+        self.idx = min(self.total - 1, self.idx + 1)
+        self._add_nav()
+        await interaction.response.edit_message(embed=self.current_embed(), view=self)
+
+
+class RosterOrgSelect(ui.UserSelect):
+    def __init__(self):
+        super().__init__(
+            placeholder="🏢 Орг ✅/❌ — выбери участника",
+            min_values=1, max_values=1, row=0,
+            custom_id="roster_org_select",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not _has_roster_access(interaction):
+            return await interaction.response.send_message("❌ Нет доступа!", ephemeral=True)
+        target = self.values[0]
+        gid    = interaction.guild_id
+        roster_members.setdefault(gid, {}).setdefault(target.id, {"in_org": False, "faction": None})
+        ud           = roster_members[gid][target.id]
+        ud["in_org"] = not ud["in_org"]
+        save_data()
+        await _refresh_roster(interaction.guild)
+        status = "✅ в организации" if ud["in_org"] else "❌ не в организации"
+        await interaction.response.send_message(f"{target.mention} теперь **{status}**", ephemeral=True)
+
+
+class RosterFracUserSelect(ui.UserSelect):
+    def __init__(self):
+        super().__init__(
+            placeholder="⚔️ Фракция — выбери участника",
+            min_values=1, max_values=1, row=1,
+            custom_id="roster_frac_user_select",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not _has_roster_access(interaction):
+            return await interaction.response.send_message("❌ Нет доступа!", ephemeral=True)
+        target = self.values[0]
+        await interaction.response.send_message(
+            f"Выбери фракцию для {target.mention}:",
+            view=RosterFracPickView(target.id),
+            ephemeral=True,
+        )
+
+
+class RosterFracSelect(ui.Select):
+    def __init__(self, target_id: int):
+        self.target_id = target_id
+        options = [
+            discord.SelectOption(label="Без фракции", value=NO_FACTION_KEY, emoji="😴"),
+        ] + [
+            discord.SelectOption(label=f"{short} — {full}", value=short, emoji=emoji)
+            for short, (full, emoji) in FACTIONS.items()
+        ]
+        super().__init__(
+            placeholder="Выбери фракцию...",
+            options=options[:25],
+            row=0,
+            custom_id=f"roster_frac_pick_{target_id}",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        gid     = interaction.guild_id
+        faction = self.values[0]
+        roster_members.setdefault(gid, {}).setdefault(self.target_id, {"in_org": False, "faction": None})
+        roster_members[gid][self.target_id]["faction"] = faction if faction != NO_FACTION_KEY else None
+        save_data()
+        await _refresh_roster(interaction.guild)
+        frac_str = _faction_display(interaction.guild, faction if faction != NO_FACTION_KEY else None)
+        await interaction.response.send_message(f"<@{self.target_id}> → {frac_str}", ephemeral=True)
+
+
+class RosterFracPickView(ui.View):
+    def __init__(self, target_id: int):
+        super().__init__(timeout=60)
+        self.add_item(RosterFracSelect(target_id))
+
+
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    cfg             = roster_settings.get(after.guild.id, {})
+    member_role_id  = cfg.get("member_role_id")
+    academy_role_id = cfg.get("academy_role_id")
+    if not member_role_id and not academy_role_id:
+        return
+    before_ids = {r.id for r in before.roles}
+    after_ids  = {r.id for r in after.roles}
+    watch_ids  = set(filter(None, [member_role_id, academy_role_id]))
+    if watch_ids & (before_ids ^ after_ids):
+        await _refresh_roster(after.guild)
+
+
+@tree.command(name="состав_настройка", description="Настроить роли и канал для состава семьи")
+@app_commands.describe(
+    роль_участника="Роль полноценных участников",
+    роль_академии="Роль академиков",
+    канал="Канал где будет жить состав",
+)
+@app_commands.default_permissions(administrator=True)
+async def slash_roster_setup(
+    interaction: discord.Interaction,
+    роль_участника: discord.Role,
+    роль_академии: discord.Role,
+    канал: discord.TextChannel,
+):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    gid = interaction.guild_id
+    cfg = roster_settings.setdefault(gid, {})
+    cfg["member_role_id"]  = роль_участника.id
+    cfg["academy_role_id"] = роль_академии.id
+    cfg["channel_id"]      = канал.id
+    await _refresh_roster(interaction.guild)
+    await interaction.followup.send(f"✅ Состав настроен! Панель отправлена в {канал.mention}", ephemeral=True)
+
+
+@tree.command(name="состав_доступ", description="Добавить/убрать роль с доступом к изменению состава")
+@app_commands.describe(роль="Роль которой разрешить управление составом")
+@app_commands.default_permissions(administrator=True)
+async def slash_roster_access(interaction: discord.Interaction, роль: discord.Role):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+    gid  = interaction.guild_id
+    cfg  = roster_settings.setdefault(gid, {})
+    ids  = cfg.setdefault("access_role_ids", [])
+    if роль.id in ids:
+        ids.remove(роль.id)
+        action = "убрана из"
+    else:
+        ids.append(роль.id)
+        action = "добавлена в"
+    save_data()
+    await interaction.response.send_message(
+        f"✅ Роль {роль.mention} **{action}** доступа к управлению составом.", ephemeral=True
+    )
+
+
+@tree.command(name="состав", description="Показать состав семьи")
+async def slash_roster(interaction: discord.Interaction):
+    await interaction.response.defer()
+    full_lines, academy_lines = await _collect_roster_lines(interaction.guild)
+    view  = RosterPaginationView(interaction.guild, full_lines, academy_lines)
+    embed = view.current_embed()
+    await interaction.followup.send(embed=embed, view=view)
+
+
+# ─────────────────────────────────────────────
+# РУЛЕТКА
+# ─────────────────────────────────────────────
+
+roulette_stats: dict = {}
+roulette_cd: dict = {}
+
+ROULETTE_MIN  = 10
+ROULETTE_MAX  = 1000
+ROULETTE_CD_S = 5
+
+RED_NUMBERS   = {1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}
+BLACK_NUMBERS = {2,4,6,8,10,11,13,15,17,20,22,24,26,28,29,31,33,35}
+
+
+def _roulette_key(guild_id: int, user_id: int) -> str:
+    return f"{guild_id}:{user_id}"
+
+
+def save_roulette():
+    try:
+        data = {"stats": roulette_stats}
+        with open(ROULETTE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"WARNING: Failed to save roulette: {e}")
+
+
+def load_roulette():
+    try:
+        if not os.path.exists(ROULETTE_FILE):
+            return
+        with open(ROULETTE_FILE, "r", encoding="utf-8") as f:
+            doc = json.load(f)
+        roulette_stats.update(doc.get("stats", {}))
+        print("OK: Roulette stats loaded from roulette.json")
+    except Exception as e:
+        print(f"WARNING: Failed to load roulette stats: {e}")
+
+
+def _get_roulette_stats(guild_id: int, user_id: int) -> dict:
+    key = _roulette_key(guild_id, user_id)
+    if key not in roulette_stats:
+        roulette_stats[key] = {"games": 0, "wins": 0, "loses": 0, "profit": 0}
+    return roulette_stats[key]
+
+
+def _update_roulette_stats(guild_id: int, user_id: int, won: bool, profit_delta: int):
+    s = _get_roulette_stats(guild_id, user_id)
+    s["games"]  += 1
+    s["wins"]   += 1 if won else 0
+    s["loses"]  += 0 if won else 1
+    s["profit"] += profit_delta
+    save_roulette()
+
+
+def _spin() -> int:
+    return random.randint(0, 36)
+
+
+def _number_color(n: int) -> str:
+    if n == 0:              return "зелёное"
+    if n in RED_NUMBERS:   return "красное"
+    return "чёрное"
+
+
+def _color_emoji(color: str) -> str:
+    return {"красное": "🔴", "чёрное": "⚫", "зелёное": "🟢"}.get(color, "⚪")
+
+
+def _fmt_r(n: int) -> str:
+    return f"{n:,}".replace(",", " ")
+
+
+def _parse_bet(raw: str):
+    low = raw.lower()
+    if low in ("красное", "красный"):
+        return ("color", "красное")
+    if low in ("чёрное", "чёрный", "черное", "черный"):
+        return ("color", "чёрное")
+    try:
+        n = int(raw)
+        if 0 <= n <= 36:
+            return ("number", n)
+    except ValueError:
+        pass
+    return None
+
+
+def _check_roulette_cd(guild_id: int, user_id: int) -> float:
+    last = roulette_cd.get(guild_id, {}).get(user_id)
+    if not last:
+        return 0.0
+    elapsed = (datetime.now() - last).total_seconds()
+    return max(0.0, ROULETTE_CD_S - elapsed)
+
+
+def _set_roulette_cd(guild_id: int, user_id: int):
+    if guild_id not in roulette_cd:
+        roulette_cd[guild_id] = {}
+    roulette_cd[guild_id][user_id] = datetime.now()
+
+
+@bot.command(name="рулетка")
+async def roulette_cmd(ctx, bet_type: str = None, amount: str = None):
+    guild_id = ctx.guild.id
+    user_id  = ctx.author.id
+
+    if not bet_type or not amount:
+        embed = discord.Embed(
+            title="🎰 Рулетка — Помощь",
+            description=(
+                "**Формат:** `!рулетка <ставка> <сумма>`\n\n"
+                "**Ставки:**\n"
+                "• `красное` — цвет x2\n"
+                "• `чёрное` — цвет x2\n"
+                "• `0-36` — число x35\n\n"
+                f"**Мин. ставка:** {_fmt_r(ROULETTE_MIN)} 💎\n"
+                f"**Макс. ставка:** {_fmt_r(ROULETTE_MAX)} 💎\n\n"
+                "**Примеры:**\n"
+                "`!рулетка красное 100`\n"
+                "`!рулетка 17 50`"
+            ),
+            color=discord.Color.blurple(),
+        )
+        embed.set_footer(text="DIAMOND", icon_url=_footer(guild_id))
+        return await ctx.send(embed=embed)
+
+    cd_left = _check_roulette_cd(guild_id, user_id)
+    if cd_left > 0:
+        return await ctx.send(
+            f"⏳ {ctx.author.mention}, подожди ещё **{cd_left:.1f} сек.** перед следующей ставкой.",
+            delete_after=4,
+        )
+
+    parsed = _parse_bet(bet_type)
+    if not parsed:
+        return await ctx.send("❌ Неверный тип ставки. Укажи: `красное`, `чёрное` или число `0-36`.", delete_after=6)
+
+    try:
+        stake = int(amount.replace(" ", "").replace("_", ""))
+    except ValueError:
+        return await ctx.send("❌ Сумма должна быть целым числом.", delete_after=6)
+
+    if stake < ROULETTE_MIN:
+        return await ctx.send(f"❌ Минимальная ставка — **{_fmt_r(ROULETTE_MIN)}** 💎", delete_after=6)
+    if stake > ROULETTE_MAX:
+        return await ctx.send(f"❌ Максимальная ставка — **{_fmt_r(ROULETTE_MAX)}** 💎", delete_after=6)
+
+    balance = get_points(guild_id, user_id)
+    if balance < stake:
+        return await ctx.send(
+            f"❌ Недостаточно баллов! Нужно **{_fmt_r(stake)}** 💎, у вас **{_fmt_r(balance)}** 💎",
+            delete_after=8,
+        )
+
+    _set_roulette_cd(guild_id, user_id)
+
+    anim_embed = discord.Embed(title="🎰 Крутим рулетку...", description="Подождите...", color=0xf1c40f)
+    anim_embed.set_footer(text="DIAMOND", icon_url=_footer(guild_id))
+    msg = await ctx.send(embed=anim_embed)
+
+    for _ in range(3):
+        fake_n = random.randint(0, 36)
+        anim_embed.description = f"{_color_emoji(_number_color(fake_n))} **{fake_n}**..."
+        await msg.edit(embed=anim_embed)
+        await asyncio.sleep(0.8)
+
+    result_n     = _spin()
+    result_color = _number_color(result_n)
+    color_emoji  = _color_emoji(result_color)
+
+    bet_kind, bet_val = parsed
+    if bet_kind == "color":
+        won = (result_color == bet_val)
+        bet_label = f"{_color_emoji(bet_val)} {bet_val}"
+        payout    = stake * 2 if won else 0
+    else:
+        won = (result_n == bet_val)
+        bet_label = f"🎯 число {bet_val}"
+        payout    = stake * 35 if won else 0
+
+    profit_delta = payout - stake
+    add_points(guild_id, user_id, profit_delta)
+    _update_roulette_stats(guild_id, user_id, won, profit_delta)
+    new_balance = get_points(guild_id, user_id)
+
+    result_color_embed = discord.Color.green() if won else discord.Color.red()
+    result_title       = "🎉 ПОБЕДА!" if won else "💸 ПРОИГРЫШ"
+    result_text        = f"**+{_fmt_r(payout)}** 💎" if won else f"**-{_fmt_r(stake)}** 💎"
+
+    final_embed = discord.Embed(title=f"🎰 РУЛЕТКА — {result_title}", color=result_color_embed, timestamp=datetime.now())
+    final_embed.add_field(name="Ставка",   value=f"**{_fmt_r(stake)}** 💎 на {bet_label}", inline=True)
+    final_embed.add_field(name="Выпало",   value=f"{color_emoji} **{result_n}** ({result_color})", inline=True)
+    final_embed.add_field(name="Результат", value=result_text, inline=True)
+    final_embed.add_field(name="Баланс",   value=f"**{_fmt_r(new_balance)}** 💎", inline=False)
+    final_embed.set_footer(text="DIAMOND", icon_url=_footer(guild_id))
+    await msg.edit(embed=final_embed)
+
+
+@tree.command(name="рулетка_топ", description="ТОП-10 игроков рулетки по профиту")
+async def slash_roulette_top(interaction: discord.Interaction):
+    guild_id = interaction.guild_id
+
+    guild_entries = [
+        (key, data)
+        for key, data in roulette_stats.items()
+        if key.startswith(f"{guild_id}:")
+    ]
+
+    if not guild_entries:
+        return await interaction.response.send_message("🎰 Пока никто не играл!", ephemeral=True)
+
+    guild_entries.sort(key=lambda x: x[1]["profit"], reverse=True)
+    top10 = guild_entries[:10]
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines  = []
+    for i, (key, data) in enumerate(top10):
+        user_id = int(key.split(":")[1])
+        games   = data["games"]
+        wins    = data["wins"]
+        profit  = data["profit"]
+        winrate = round((wins / games * 100)) if games > 0 else 0
+        medal   = medals[i] if i < 3 else f"`{i+1}.`"
+        profit_s = f"+{_fmt_r(profit)}" if profit >= 0 else f"-{_fmt_r(abs(profit))}"
+        lines.append(
+            f"{medal} <@{user_id}>\n"
+            f"🎮 Игр: **{games}** • ✅ Побед: **{wins}** • 📈 WR: **{winrate}%**\n"
+            f"💰 Профит: **{profit_s}** 💎\n"
+        )
+
+    embed = discord.Embed(
+        title="🏆 ТОП РУЛЕТКИ",
+        description="\n".join(lines),
+        color=discord.Color.gold(),
+        timestamp=datetime.now(),
+    )
+    embed.set_footer(text="DIAMOND", icon_url=_footer(guild_id))
     await interaction.response.send_message(embed=embed)
 
 

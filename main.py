@@ -129,6 +129,15 @@ mp_roles: dict = {}
 # 🔫 РОЛЬ ВЗП { guild_id: role_id }
 vzp_roles: dict = {}
 
+# 🔫 ВТОРАЯ РОЛЬ ВЗП { guild_id: role_id }
+vzp_roles2: dict = {}
+
+# 🏎 ВТОРАЯ РОЛЬ МП { guild_id: role_id }
+mp_roles2: dict = {}
+
+# 🎯 ВТОРАЯ РОЛЬ LIST/РЕАКИ { guild_id: role_id }
+list_roles2: dict = {}
+
 # 🎯 РОЛИ ДОСТУПА К КОМАНДАМ СБОРОВ { guild_id: { "vzp": [role_id,...], "mp": [...], "list": [...] } }
 event_command_roles: dict = {}
 
@@ -268,9 +277,14 @@ def build_event_embed(
     image_url: str = None,
     note: str = None,
     join_mode: bool = False,
+    event_time: str = None,
+    closed: bool = False,
 ) -> discord.Embed:
     filled = sum(1 for v in slots.values() if v is not None)
-    color  = discord.Color.red() if filled >= max_count else discord.Color.green()
+    if closed:
+        color = discord.Color.from_rgb(153, 170, 181)
+    else:
+        color = discord.Color.red() if filled >= max_count else discord.Color.green()
 
     lines = []
     for i in range(1, max_count + 1):
@@ -278,10 +292,17 @@ def build_event_embed(
         lines.append(f"`{str(i).zfill(2)}.` {'<@' + str(uid) + '>' if uid else '*свободно*'}")
 
     text = "\n".join(lines)
+    prefix = ""
+    if event_time:
+        prefix += f"🕐 **Время:** `{event_time}`\n"
+    if closed:
+        prefix += "🔒 **СПИСОК ЗАКРЫТ**\n"
+    if prefix:
+        prefix += "\n"
     if join_mode:
-        description = f"Нажми ✅ чтобы записаться\n\n**Участники ({filled}/{max_count}):**\n{text}"
+        description = f"{prefix}Нажми ✅ чтобы записаться\n\n**Участники ({filled}/{max_count}):**\n{text}"
     else:
-        description = f"Нажми кнопку с нужным номером слота\n\n**Слоты ({filled}/{max_count}):**\n{text}"
+        description = f"{prefix}Нажми кнопку с нужным номером слота\n\n**Слоты ({filled}/{max_count}):**\n{text}"
     if note:
         description += f"\n\n📌 **Заметка:** {note}"
 
@@ -344,7 +365,8 @@ class KickModal(ui.Modal, title="Кикнуть из списка"):
                     join_mode = data.get("mode") == "join"
                     embed = build_event_embed(
                         interaction.guild_id, data["title"], data["max"], slots,
-                        data.get("image_url"), data.get("note"), join_mode=join_mode
+                        data.get("image_url"), data.get("note"), join_mode=join_mode,
+                        event_time=data.get("event_time"), closed=data.get("closed", False),
                     )
                     view = JoinEventView(self.message_id) if join_mode else EventView(self.message_id)
                     await orig_msg.edit(embed=embed, view=view)
@@ -377,10 +399,51 @@ class KickButton(ui.Button):
         await interaction.response.send_modal(KickModal(self.message_id))
 
 
+class CloseListButton(ui.Button):
+    def __init__(self, message_id: int, is_closed: bool):
+        super().__init__(
+            label="🔓 Открыть список" if is_closed else "🔒 Закрыть список",
+            style=discord.ButtonStyle.secondary if is_closed else discord.ButtonStyle.danger,
+            custom_id=f"close_list_{message_id}",
+        )
+        self.message_id = message_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if not is_admin(interaction):
+            return await interaction.response.send_message("❌ Только для администраторов!", ephemeral=True)
+
+        data = event_lists.get(self.message_id)
+        if not data:
+            return await interaction.response.send_message("❌ Сбор не найден!", ephemeral=True)
+
+        data["closed"] = not data.get("closed", False)
+        save_data()
+
+        try:
+            channel = bot.get_channel(data["channel_id"])
+            orig_msg = await channel.fetch_message(self.message_id)
+            join_mode = data.get("mode") == "join"
+            embed = build_event_embed(
+                interaction.guild_id, data["title"], data["max"], data["slots"],
+                data.get("image_url"), data.get("note"), join_mode=join_mode,
+                event_time=data.get("event_time"), closed=data["closed"],
+            )
+            view = JoinEventView(self.message_id) if join_mode else EventView(self.message_id)
+            await orig_msg.edit(embed=embed, view=view)
+        except Exception:
+            pass
+
+        await update_thread_list(self.message_id)
+        status = "закрыт 🔒" if data["closed"] else "открыт 🔓"
+        await interaction.response.send_message(f"✅ Список **{status}**!", ephemeral=True)
+
+
 class ThreadListView(ui.View):
     def __init__(self, message_id: int):
         super().__init__(timeout=None)
         self.add_item(KickButton(message_id))
+        data = event_lists.get(message_id)
+        self.add_item(CloseListButton(message_id, (data or {}).get("closed", False)))
 
 
 async def update_thread_list(message_id: int):
@@ -574,7 +637,10 @@ def save_data():
         "guild_branding":        {str(g): v for g, v in guild_branding.items()},
         "ticket_manager_roles": {str(g): v for g, v in ticket_manager_roles.items()},
         "mp_roles":             {str(g): v for g, v in mp_roles.items()},
+        "mp_roles2":            {str(g): v for g, v in mp_roles2.items()},
         "vzp_roles":            {str(g): v for g, v in vzp_roles.items()},
+        "vzp_roles2":           {str(g): v for g, v in vzp_roles2.items()},
+        "list_roles2":          {str(g): v for g, v in list_roles2.items()},
         "warn_roles":           {str(g): {str(k): v for k, v in wr.items()} for g, wr in warn_roles.items()},
         "admin_roles":          {str(g): v for g, v in admin_roles.items()},
         "ticket_viewer_roles":  {str(g): v for g, v in ticket_viewer_roles.items()},
@@ -671,6 +737,12 @@ def load_data():
             mp_roles[int(g)] = v
         for g, v in data.get("vzp_roles", {}).items():
             vzp_roles[int(g)] = v
+        for g, v in data.get("vzp_roles2", {}).items():
+            vzp_roles2[int(g)] = v
+        for g, v in data.get("mp_roles2", {}).items():
+            mp_roles2[int(g)] = v
+        for g, v in data.get("list_roles2", {}).items():
+            list_roles2[int(g)] = v
         for g, wr in data.get("warn_roles", {}).items():
             warn_roles[int(g)] = {int(k): v for k, v in wr.items()}
         for g, v in data.get("admin_roles", {}).items():
@@ -820,6 +892,9 @@ class SlotButton(ui.Button):
         if not data:
             return await interaction.response.send_message("❌ Сбор уже недоступен!", ephemeral=True)
 
+        if data.get("closed"):
+            return await interaction.response.send_message("🔒 Список закрыт!", ephemeral=True)
+
         user_id = interaction.user.id
         slots   = data["slots"]
 
@@ -842,7 +917,11 @@ class SlotButton(ui.Button):
 
         save_data()
         new_view = EventView(self.message_id)
-        embed    = build_event_embed(interaction.guild_id, data["title"], data["max"], slots, data.get("image_url"), data.get("note"))
+        embed    = build_event_embed(
+            interaction.guild_id, data["title"], data["max"], slots,
+            data.get("image_url"), data.get("note"),
+            event_time=data.get("event_time"), closed=data.get("closed", False),
+        )
         await interaction.response.defer()
         await interaction.message.edit(embed=embed, view=new_view)
         await update_thread_list(self.message_id)
@@ -880,6 +959,9 @@ class JoinButton(ui.Button):
         if not data:
             return await interaction.response.send_message("❌ Сбор недоступен!", ephemeral=True)
 
+        if data.get("closed"):
+            return await interaction.response.send_message("🔒 Список закрыт!", ephemeral=True)
+
         user_id = interaction.user.id
         slots   = data["slots"]
 
@@ -888,7 +970,11 @@ class JoinButton(ui.Button):
             if uid == user_id:
                 slots[slot_num] = None
                 save_data()
-                embed = build_event_embed(interaction.guild_id, data["title"], data["max"], slots, data.get("image_url"), data.get("note"), join_mode=True)
+                embed = build_event_embed(
+                    interaction.guild_id, data["title"], data["max"], slots,
+                    data.get("image_url"), data.get("note"), join_mode=True,
+                    event_time=data.get("event_time"), closed=data.get("closed", False),
+                )
                 await interaction.response.defer()
                 await interaction.message.edit(embed=embed)
                 await update_thread_list(self.message_id)
@@ -900,7 +986,11 @@ class JoinButton(ui.Button):
             if slots.get(i) is None:
                 slots[i] = user_id
                 save_data()
-                embed = build_event_embed(interaction.guild_id, data["title"], data["max"], slots, data.get("image_url"), data.get("note"), join_mode=True)
+                embed = build_event_embed(
+                    interaction.guild_id, data["title"], data["max"], slots,
+                    data.get("image_url"), data.get("note"), join_mode=True,
+                    event_time=data.get("event_time"), closed=data.get("closed", False),
+                )
                 await interaction.response.defer()
                 await interaction.message.edit(embed=embed)
                 await update_thread_list(self.message_id)
@@ -1558,7 +1648,7 @@ async def set_event_role(ctx, роль: discord.Role):
     await ctx.message.delete()
 
 
-async def _create_event_message(channel, guild, title: str, max_count: int, image_file=None, image_ref: str | None = None, content: str | None = None, force_join_mode: bool = False):
+async def _create_event_message(channel, guild, title: str, max_count: int, image_file=None, image_ref: str | None = None, content: str | None = None, force_join_mode: bool = False, event_time: str = None):
     """Создаёт сбор: эмбед + тред. <= 24 слотов → кнопки-цифры, > 24 → одна кнопка ✅."""
     if not (1 <= max_count <= 100):
         await channel.send("❌ Количество слотов: от 1 до 100!", delete_after=5)
@@ -1567,7 +1657,7 @@ async def _create_event_message(channel, guild, title: str, max_count: int, imag
     join_mode = force_join_mode or max_count > 24
     slots     = {i: None for i in range(1, max_count + 1)}
 
-    embed = build_event_embed(guild.id, title, max_count, slots, image_ref, join_mode=join_mode)
+    embed = build_event_embed(guild.id, title, max_count, slots, image_ref, join_mode=join_mode, event_time=event_time)
 
     if image_file:
         msg = await channel.send(content=content, embed=embed, file=image_file)
@@ -1583,6 +1673,7 @@ async def _create_event_message(channel, guild, title: str, max_count: int, imag
         "title": title, "max": max_count, "mode": "join" if join_mode else "buttons",
         "slots": slots, "image_url": image_ref, "note": None,
         "channel_id": channel.id, "thread_id": None, "thread_msg_id": None,
+        "event_time": event_time, "closed": False,
     }
 
     view = JoinEventView(msg.id) if join_mode else EventView(msg.id)
@@ -1633,7 +1724,7 @@ async def взп_cmd(ctx, количество: int = 10, *, название: s
     except Exception:
         pass
 
-    # Тег: роль ВЗП + роль МП
+    # Тег: роль ВЗП + роль МП + доп. роль
     mentions = []
     vzp_role_id = vzp_roles.get(ctx.guild.id)
     if vzp_role_id:
@@ -1645,9 +1736,20 @@ async def взп_cmd(ctx, количество: int = 10, *, название: s
         r = ctx.guild.get_role(mp_role_id)
         if r:
             mentions.append(r.mention)
+    vzp2_role_id = vzp_roles2.get(ctx.guild.id)
+    if vzp2_role_id:
+        r = ctx.guild.get_role(vzp2_role_id)
+        if r:
+            mentions.append(r.mention)
     content = " ".join(mentions) if mentions else None
 
-    await _create_event_message(ctx.channel, ctx.guild, название, количество, image_file, image_ref, content=content)
+    event_time = None
+    m = re.match(r'^(\d{1,2}:\d{2})\s*(.*)', название)
+    if m:
+        event_time = m.group(1)
+        название = m.group(2).strip() or "ВЗП"
+
+    await _create_event_message(ctx.channel, ctx.guild, название, количество, image_file, image_ref, content=content, event_time=event_time)
 
 
 @bot.command(name="mp")
@@ -1674,14 +1776,26 @@ async def мп_cmd(ctx, количество: int = 10, *, название: str
     except Exception:
         pass
 
+    mentions = []
     mp_role_id = mp_roles.get(ctx.guild.id)
-    content = None
     if mp_role_id:
         r = ctx.guild.get_role(mp_role_id)
         if r:
-            content = r.mention
+            mentions.append(r.mention)
+    mp2_role_id = mp_roles2.get(ctx.guild.id)
+    if mp2_role_id:
+        r = ctx.guild.get_role(mp2_role_id)
+        if r:
+            mentions.append(r.mention)
+    content = " ".join(mentions) if mentions else None
 
-    await _create_event_message(ctx.channel, ctx.guild, название, количество, image_file, image_ref, content=content)
+    event_time = None
+    m = re.match(r'^(\d{1,2}:\d{2})\s*(.*)', название)
+    if m:
+        event_time = m.group(1)
+        название = m.group(2).strip() or "МП"
+
+    await _create_event_message(ctx.channel, ctx.guild, название, количество, image_file, image_ref, content=content, event_time=event_time)
 
 
 @bot.command(name="роль_взп")
@@ -1711,6 +1825,57 @@ async def set_mp_role(ctx, роль: discord.Role):
     embed = discord.Embed(
         title="✅ Роль МП настроена",
         description=f"В `!vzp` и `!mp` будет тегаться {роль.mention}",
+        color=discord.Color.green(),
+    )
+    embed.set_footer(text="DIAMOND", icon_url=_footer(ctx.guild.id))
+    await ctx.send(embed=embed, delete_after=10)
+    await ctx.message.delete()
+
+
+@bot.command(name="роль_взп2")
+async def set_vzp_role2(ctx, роль: discord.Role):
+    """!роль_взп2 @роль — дополнительная роль для тега в !vzp"""
+    if not is_admin_ctx(ctx):
+        return await ctx.message.delete()
+    vzp_roles2[ctx.guild.id] = роль.id
+    save_data()
+    embed = discord.Embed(
+        title="✅ Доп. роль ВЗП настроена",
+        description=f"В `!vzp` дополнительно будет тегаться {роль.mention}",
+        color=discord.Color.green(),
+    )
+    embed.set_footer(text="DIAMOND", icon_url=_footer(ctx.guild.id))
+    await ctx.send(embed=embed, delete_after=10)
+    await ctx.message.delete()
+
+
+@bot.command(name="роль_мп2")
+async def set_mp_role2(ctx, роль: discord.Role):
+    """!роль_мп2 @роль — дополнительная роль для тега в !mp"""
+    if not is_admin_ctx(ctx):
+        return await ctx.message.delete()
+    mp_roles2[ctx.guild.id] = роль.id
+    save_data()
+    embed = discord.Embed(
+        title="✅ Доп. роль МП настроена",
+        description=f"В `!mp` дополнительно будет тегаться {роль.mention}",
+        color=discord.Color.green(),
+    )
+    embed.set_footer(text="DIAMOND", icon_url=_footer(ctx.guild.id))
+    await ctx.send(embed=embed, delete_after=10)
+    await ctx.message.delete()
+
+
+@bot.command(name="роль_реаки2")
+async def set_event_role2(ctx, роль: discord.Role):
+    """!роль_реаки2 @роль — дополнительная роль для тега в !list"""
+    if not is_admin_ctx(ctx):
+        return await ctx.message.delete()
+    list_roles2[ctx.guild.id] = роль.id
+    save_data()
+    embed = discord.Embed(
+        title="✅ Доп. роль list настроена",
+        description=f"В `!list` дополнительно будет тегаться {роль.mention}",
         color=discord.Color.green(),
     )
     embed.set_footer(text="DIAMOND", icon_url=_footer(ctx.guild.id))
@@ -1792,14 +1957,26 @@ async def реаки_cmd(ctx, количество: int = 10, *, названи�
     except Exception:
         pass
 
+    mentions = []
     event_role_id = event_roles.get(ctx.guild.id)
-    content = None
     if event_role_id:
         r = ctx.guild.get_role(event_role_id)
         if r:
-            content = r.mention
+            mentions.append(r.mention)
+    list2_role_id = list_roles2.get(ctx.guild.id)
+    if list2_role_id:
+        r = ctx.guild.get_role(list2_role_id)
+        if r:
+            mentions.append(r.mention)
+    content = " ".join(mentions) if mentions else None
 
-    await _create_event_message(ctx.channel, ctx.guild, название, количество, image_file, image_ref, content=content, force_join_mode=True)
+    event_time = None
+    m = re.match(r'^(\d{1,2}:\d{2})\s*(.*)', название)
+    if m:
+        event_time = m.group(1)
+        название = m.group(2).strip() or "Реакции"
+
+    await _create_event_message(ctx.channel, ctx.guild, название, количество, image_file, image_ref, content=content, force_join_mode=True, event_time=event_time)
 
 
 # ─────────────────────────────────────────────
@@ -1810,8 +1987,9 @@ async def реаки_cmd(ctx, количество: int = 10, *, названи�
 @app_commands.describe(
     количество="Количество слотов (по умолчанию 10)",
     название="Название сбора (по умолчанию ВЗП)",
+    время="Время сбора (например 20:30)",
 )
-async def slash_vzp(interaction: discord.Interaction, количество: int = 10, название: str = "ВЗП"):
+async def slash_vzp(interaction: discord.Interaction, количество: int = 10, название: str = "ВЗП", время: str = None):
     if not can_run_event_slash(interaction, "vzp"):
         return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
     await interaction.response.defer(ephemeral=True)
@@ -1826,8 +2004,13 @@ async def slash_vzp(interaction: discord.Interaction, количество: int 
         r = interaction.guild.get_role(mp_role_id)
         if r:
             mentions.append(r.mention)
+    vzp2_role_id = vzp_roles2.get(interaction.guild_id)
+    if vzp2_role_id:
+        r = interaction.guild.get_role(vzp2_role_id)
+        if r:
+            mentions.append(r.mention)
     content = " ".join(mentions) if mentions else None
-    await _create_event_message(interaction.channel, interaction.guild, название, количество, content=content)
+    await _create_event_message(interaction.channel, interaction.guild, название, количество, content=content, event_time=время)
     await interaction.followup.send("✅ Сбор ВЗП создан!", ephemeral=True)
 
 
@@ -1835,18 +2018,25 @@ async def slash_vzp(interaction: discord.Interaction, количество: int 
 @app_commands.describe(
     количество="Количество слотов (по умолчанию 10)",
     название="Название сбора (по умолчанию МП)",
+    время="Время сбора (например 20:30)",
 )
-async def slash_mp(interaction: discord.Interaction, количество: int = 10, название: str = "МП"):
+async def slash_mp(interaction: discord.Interaction, количество: int = 10, название: str = "МП", время: str = None):
     if not can_run_event_slash(interaction, "mp"):
         return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
     await interaction.response.defer(ephemeral=True)
+    mentions = []
     mp_role_id = mp_roles.get(interaction.guild_id)
-    content = None
     if mp_role_id:
         r = interaction.guild.get_role(mp_role_id)
         if r:
-            content = r.mention
-    await _create_event_message(interaction.channel, interaction.guild, название, количество, content=content)
+            mentions.append(r.mention)
+    mp2_role_id = mp_roles2.get(interaction.guild_id)
+    if mp2_role_id:
+        r = interaction.guild.get_role(mp2_role_id)
+        if r:
+            mentions.append(r.mention)
+    content = " ".join(mentions) if mentions else None
+    await _create_event_message(interaction.channel, interaction.guild, название, количество, content=content, event_time=время)
     await interaction.followup.send("✅ Сбор МП создан!", ephemeral=True)
 
 
@@ -1854,18 +2044,25 @@ async def slash_mp(interaction: discord.Interaction, количество: int =
 @app_commands.describe(
     количество="Количество слотов (по умолчанию 10)",
     название="Название сбора (по умолчанию Реакции)",
+    время="Время сбора (например 20:30)",
 )
-async def slash_reaki(interaction: discord.Interaction, количество: int = 10, название: str = "Реакции"):
+async def slash_reaki(interaction: discord.Interaction, количество: int = 10, название: str = "Реакции", время: str = None):
     if not can_run_event_slash(interaction, "reaki"):
         return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
     await interaction.response.defer(ephemeral=True)
+    mentions = []
     event_role_id = event_roles.get(interaction.guild_id)
-    content = None
     if event_role_id:
         r = interaction.guild.get_role(event_role_id)
         if r:
-            content = r.mention
-    await _create_event_message(interaction.channel, interaction.guild, название, количество, content=content, force_join_mode=True)
+            mentions.append(r.mention)
+    list2_role_id = list_roles2.get(interaction.guild_id)
+    if list2_role_id:
+        r = interaction.guild.get_role(list2_role_id)
+        if r:
+            mentions.append(r.mention)
+    content = " ".join(mentions) if mentions else None
+    await _create_event_message(interaction.channel, interaction.guild, название, количество, content=content, force_join_mode=True, event_time=время)
     await interaction.followup.send("✅ Сбор реакций создан!", ephemeral=True)
 
 
@@ -2443,7 +2640,7 @@ async def замена_cmd(ctx, кого: int, на_кого: int = 0):
         channel = bot.get_channel(data["channel_id"])
         msg = await channel.fetch_message(msg_id)
         join_mode = data.get("mode") == "join"
-        embed = build_event_embed(ctx.guild.id, data["title"], data["max"], slots, data.get("image_url"), data.get("note"), join_mode=join_mode)
+        embed = build_event_embed(ctx.guild.id, data["title"], data["max"], slots, data.get("image_url"), data.get("note"), join_mode=join_mode, event_time=data.get("event_time"), closed=data.get("closed", False))
         view = JoinEventView(msg_id) if join_mode else EventView(msg_id)
         await msg.edit(embed=embed, view=view)
     except Exception:

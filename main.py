@@ -4218,10 +4218,10 @@ def _parse_channel_id(val: str):
 
 class VzpSetupModal(ui.Modal, title="⚔️ Настройка мониторинга ВЗП"):
     family_input = ui.TextInput(
-        label="Название семьи",
-        placeholder="Например: DIAMOND",
+        label="ID семьи (из ссылки на vzp-gta5rp.com)",
+        placeholder="15607 или https://vzp-gta5rp.com/stats/families/15607",
         required=True,
-        max_length=50,
+        max_length=200,
     )
     server_input = ui.TextInput(
         label="ID сервера GTA5RP",
@@ -4249,35 +4249,26 @@ class VzpSetupModal(ui.Modal, title="⚔️ Настройка монитори�
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        raw = self.family_input.value.strip().rstrip("/")
+        family_id_str = raw.split("/")[-1]
+        try:
+            family_id = int(family_id_str)
+        except ValueError:
+            await interaction.response.send_message(
+                "❌ Введи числовой ID семьи или ссылку вида `vzp-gta5rp.com/stats/families/15607`.", ephemeral=True
+            )
+            return
+
         async with aiohttp.ClientSession() as session:
-            orgs_raw = await _vzp_get(session, "/stats/organizations")
-        orgs = _vzp_unwrap(orgs_raw)
-        if not isinstance(orgs, list):
-            await interaction.response.send_message("❌ Не удалось получить список семей с API.", ephemeral=True)
-            return
-
-        query = self.family_input.value.strip().lower()
-        matches = [o for o in orgs if isinstance(o, dict) and query in (o.get("name") or "").lower()]
-
-        if not matches:
+            org_raw = await _vzp_get(session, f"/stats/organizations/{family_id}")
+        org = _vzp_unwrap(org_raw)
+        if not isinstance(org, dict) or not org.get("id"):
             await interaction.response.send_message(
-                f"❌ Семья `{self.family_input.value}` не найдена. Проверь название.", ephemeral=True
+                f"❌ Семья с ID `{family_id}` не найдена в API.", ephemeral=True
             )
             return
 
-        if len(matches) > 1:
-            view = _VzpFamilySelect(matches[:10], self)
-            desc = "\n".join(
-                f"`{i+1}.` **{m.get('name','?')}** (ID: {m.get('id','?')})"
-                for i, m in enumerate(matches[:10])
-            )
-            await interaction.response.send_message(
-                f"Найдено несколько семей:\n{desc}\n\nВыбери нужную:",
-                view=view, ephemeral=True,
-            )
-            return
-
-        await self._apply(interaction, matches[0])
+        await self._apply(interaction, org)
 
     async def _apply(self, interaction: discord.Interaction, family: dict):
         guild_id = interaction.guild_id
@@ -4335,22 +4326,6 @@ class VzpSetupModal(ui.Modal, title="⚔️ Настройка монитори�
             await interaction.response.send_message(embed=embed)
         except discord.InteractionResponded:
             await interaction.followup.send(embed=embed)
-
-
-class _VzpFamilySelect(ui.View):
-    def __init__(self, families: list, modal: VzpSetupModal):
-        super().__init__(timeout=60)
-        self.modal = modal
-        for i, fam in enumerate(families):
-            btn = ui.Button(label=(fam.get("name") or f"#{i+1}")[:25], row=i // 5)
-            btn.callback = self._make_cb(fam)
-            self.add_item(btn)
-
-    def _make_cb(self, family: dict):
-        async def cb(interaction: discord.Interaction):
-            await self.modal._apply(interaction, family)
-            self.stop()
-        return cb
 
 
 # ─── Slash Commands ───────────────────────────────────────

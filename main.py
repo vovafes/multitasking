@@ -179,6 +179,9 @@ feedback_settings: dict = {}
 # { guild_id: { "categories": [cat_id, ...], "excluded_channels": [ch_id, ...], "amount": int } }
 voice_reward_settings: dict = {}
 
+# { guild_id: channel_id }  — голосовой канал для автоподключения при старте
+voice_autoconnect: dict = {}
+
 # 🪪 ЛИЧНЫЙ КАБИНЕТ
 # { guild_id: { "channel_id": int, "message_id": int, "text": str|None, "image_url": str|None } }
 cabinet_panels: dict = {}
@@ -683,6 +686,7 @@ def save_data():
         "roster_settings":      {str(g): v for g, v in roster_settings.items()},
         "roster_members":       {str(g): {str(u): v for u, v in um.items()} for g, um in roster_members.items()},
         "voice_reward_settings": {str(g): v for g, v in voice_reward_settings.items()},
+        "voice_autoconnect":     {str(g): v for g, v in voice_autoconnect.items()},
         "cabinet_panels":        {str(g): v for g, v in cabinet_panels.items()},
         "cabinet_invite_links":  {str(g): v for g, v in cabinet_invite_links.items()},
         "message_counts":        {str(g): {str(u): v for u, v in us.items()} for g, us in message_counts.items()},
@@ -838,6 +842,8 @@ def load_data():
         # Голосовые каналы — начисление
         for g, v in data.get("voice_reward_settings", {}).items():
             voice_reward_settings[int(g)] = v
+        for g, v in data.get("voice_autoconnect", {}).items():
+            voice_autoconnect[int(g)] = v
 
         # Личный кабинет
         for g, v in data.get("cabinet_panels", {}).items():
@@ -3941,6 +3947,16 @@ async def on_ready():
         voice_reward_loop.start()
     if not afk_expire_loop.is_running():
         afk_expire_loop.start()
+    if not inactive_expire_loop.is_running():
+        inactive_expire_loop.start()
+    # Подключение к голосовым каналам при старте
+    for gid, ch_id in list(voice_autoconnect.items()):
+        try:
+            ch = bot.get_channel(ch_id)
+            if ch and isinstance(ch, discord.VoiceChannel):
+                await ch.connect()
+        except Exception as e:
+            print(f"WARNING: Could not auto-connect to voice channel {ch_id}: {e}")
     for gid in list(roster_settings.keys()):
         guild = bot.get_guild(gid)
         if guild:
@@ -4838,6 +4854,23 @@ async def slash_voice_amount(interaction: discord.Interaction, сумма: int):
     )
 
 
+@tree.command(name="войс_авто", description="Установить голосовой канал для автоподключения бота при старте (пусто — отключить)")
+@app_commands.describe(канал="Голосовой канал для автоподключения (не указывать — сбросить)")
+async def slash_voice_autoconnect(interaction: discord.Interaction, канал: discord.VoiceChannel = None):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+    gid = interaction.guild_id
+    if канал is None:
+        voice_autoconnect.pop(gid, None)
+        save_data()
+        return await interaction.response.send_message("✅ Автоподключение к войсу отключено.", ephemeral=True)
+    voice_autoconnect[gid] = канал.id
+    save_data()
+    await interaction.response.send_message(
+        f"✅ Бот будет автоматически подключаться к **{канал.name}** при запуске.", ephemeral=True
+    )
+
+
 @tree.command(name="войс_настройки", description="Показать настройки начисления за голосовые каналы")
 async def slash_voice_settings(interaction: discord.Interaction):
     if not is_admin(interaction):
@@ -5182,6 +5215,38 @@ async def afk_expire_loop():
         guild = bot.get_guild(guild_id)
         if guild:
             await refresh_afk_message(guild)
+
+
+# ─────────────────────────────────────────────
+# ТАЙМЕР ИНАКТИВА — авто-удаление по дате ДД.ММ.ГГГГ
+# ─────────────────────────────────────────────
+
+@tasks.loop(hours=1)
+async def inactive_expire_loop():
+    """Каждый час проверяет список инактива и удаляет тех, чья дата возвращения наступила (МСК)."""
+    import re as _re
+    today = now_msk().date()
+    for guild_id, users in list(inactive_list.items()):
+        expired = []
+        for uid, entry in users.items():
+            m = _re.match(r"^(\d{2})\.(\d{2})\.(\d{4})$", entry.get("return_date", "").strip())
+            if not m:
+                continue
+            try:
+                from datetime import date as _date
+                rd = _date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+            except ValueError:
+                continue
+            if today >= rd:
+                expired.append(uid)
+        if not expired:
+            continue
+        for uid in expired:
+            inactive_list[guild_id].pop(uid, None)
+        save_data()
+        guild = bot.get_guild(guild_id)
+        if guild:
+            await refresh_inactive_message(guild)
 
 
 # ─────────────────────────────────────────────

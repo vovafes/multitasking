@@ -314,6 +314,7 @@ def build_event_embed(
     join_mode: bool = False,
     event_time: str = None,
     closed: bool = False,
+    reserve: list | None = None,
 ) -> discord.Embed:
     filled = sum(1 for v in slots.values() if v is not None)
     if closed:
@@ -338,6 +339,14 @@ def build_event_embed(
         description = f"{prefix}Нажми ✅ чтобы записаться\n\n**Участники ({filled}/{max_count}):**\n{text}"
     else:
         description = f"{prefix}Нажми кнопку с нужным номером слота\n\n**Слоты ({filled}/{max_count}):**\n{text}"
+    
+    if reserve:
+        reserve = reserve or []
+        reserve_lines = [f"`R{str(i).zfill(2)}.` <@{uid}>" for i, uid in enumerate(reserve, 1)]
+        description += f"\n\n**🪑 Резерв ({len(reserve)}):**\n" + "\n".join(reserve_lines)
+    elif not join_mode:
+         description += f"\n\n**🪑 Резерв (0):**\n*пусто*"
+
     if note:
         description += f"\n\n📌 **Заметка:** {note}"
 
@@ -1500,7 +1509,57 @@ class ApplicationReviewView(ui.View):
             timestamp=datetime.now(),
         )
         close_embed.set_footer(text=f"DIAMOND • {applicant_id}", icon_url=_footer(interaction.guild_id))
-        await channel.send(embed=close_embed, view=PostCloseView())
+        
+        # Add the invite button to the close view
+        class EnhancedPostCloseView(PostCloseView):
+            @ui.button(label="Пригласить на обзвон", style=discord.ButtonStyle.primary, custom_id="ticket_invite_voice")
+            async def invite_voice(self, interaction: discord.Interaction, button: ui.Button):
+                if not is_ticket_manager(interaction):
+                    return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+                
+                await interaction.response.defer(ephemeral=True)
+                applicant_id = self._get_applicant_id(interaction.message)
+                guild = interaction.guild
+                
+                try:
+                    overwrites = {
+                        guild.default_role: discord.PermissionOverwrite(connect=False),
+                        interaction.user: discord.PermissionOverwrite(connect=True, manage_channels=True),
+                    }
+                    tm_role_id = ticket_manager_roles.get(guild.id)
+                    if tm_role_id:
+                        tm_role = guild.get_role(tm_role_id)
+                        if tm_role:
+                            overwrites[tm_role] = discord.PermissionOverwrite(connect=True)
+                    
+                    voice_channel = await guild.create_voice_channel(
+                        name=f"Обзвон-тикет-{applicant_id}",
+                        overwrites=overwrites
+                    )
+                    
+                    ticket_voice_channels[interaction.channel.id] = voice_channel.id
+                    
+                    try:
+                        target = await interaction.client.fetch_user(applicant_id)
+                        invite = await voice_channel.create_invite(max_age=3600)
+                        dm_embed = discord.Embed(
+                            title="🎙 Приглашение на обзвон",
+                            description=f"Вас приглашают на обзвон в канале {voice_channel.mention}!\n\nСсылка: {invite.url}",
+                            color=discord.Color.blue(),
+                            timestamp=datetime.now(),
+                        )
+                        dm_embed.set_footer(text="DIAMOND", icon_url=_footer(guild.id))
+                        await target.send(embed=dm_embed)
+                    except Exception as e:
+                        await interaction.followup.send(f"❌ Не удалось отправить DM пользователю: {e}", ephemeral=True)
+                    else:
+                        await interaction.followup.send(f"✅ Голосовой канал создан и приглашение отправлено в DM {applicant_id}.", ephemeral=True)
+                        
+                except Exception as e:
+                    await interaction.followup.send(f"❌ Ошибка при создании голосового канала: {e}", ephemeral=True)
+
+        await channel.send(embed=close_embed, view=EnhancedPostCloseView())
+
 
     @ui.button(label="❌ Отклонить", style=discord.ButtonStyle.danger, custom_id="ticket_reject")
     async def reject(self, interaction: discord.Interaction, button: ui.Button):
@@ -5576,21 +5635,9 @@ async def slash_voice_amount(interaction: discord.Interaction, сумма: int):
     )
 
 
-@tree.command(name="войс_авто", description="Установить голосовой канал для автоподключения бота при старте (пусто — отключить)")
-@app_commands.describe(канал="Голосовой канал для автоподключения (не указывать — сбросить)")
-async def slash_voice_autoconnect(interaction: discord.Interaction, канал: discord.VoiceChannel = None):
-    if not is_admin(interaction):
-        return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
-    gid = interaction.guild_id
-    if канал is None:
-        voice_autoconnect.pop(gid, None)
-        save_data()
-        return await interaction.response.send_message("✅ Автоподключение к войсу отключено.", ephemeral=True)
-    voice_autoconnect[gid] = канал.id
-    save_data()
-    await interaction.response.send_message(
-        f"✅ Бот будет автоматически подключаться к **{канал.name}** при запуске.", ephemeral=True
-    )
+# ─────────────────────────────────────────────
+# /активность — панель настройки мониторинга
+# ─────────────────────────────────────────────
 
 
 @tree.command(name="войс_настройки", description="Показать настройки начисления за голосовые каналы")

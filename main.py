@@ -1304,6 +1304,68 @@ class ApplicationModal(ui.Modal, title="📋 Подать заявку"):
         view = ApplicationReviewView(applicant.id)
         pings = ping_role.mention if ping_role else None
         await ticket_channel.send(content=pings, embed=embed, view=view)
+        
+        # Добавляем кнопку "Пригласить на обзвон" сразу после подачи тикета
+        invite_btn = ui.Button(label="Пригласить на обзвон", style=discord.ButtonStyle.primary, custom_id="ticket_invite_voice")
+        
+        async def invite_voice_callback(interaction: discord.Interaction):
+            if not is_ticket_manager(interaction):
+                return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+            
+            await interaction.response.defer(ephemeral=True)
+            applicant_id = view._get_applicant_id(interaction.message)
+            guild = interaction.guild
+            
+            try:
+                overwrites = {
+                    guild.default_role: discord.PermissionOverwrite(connect=False),
+                    interaction.user: discord.PermissionOverwrite(connect=True, manage_channels=True),
+                }
+                tm_role_id = ticket_manager_roles.get(guild.id)
+                if tm_role_id:
+                    tm_role = guild.get_role(tm_role_id)
+                    if tm_role:
+                        overwrites[tm_role] = discord.PermissionOverwrite(connect=True)
+                
+                voice_channel = await guild.create_voice_channel(
+                    name=f"Обзвон-тикет-{applicant_id}",
+                    overwrites=overwrites
+                )
+                
+                # В main.py используется глобальный словарь ticket_voice_channels (нужно добавить его объявление если его нет)
+                if 'ticket_voice_channels' not in globals():
+                    globals()['ticket_voice_channels'] = {}
+                globals()['ticket_voice_channels'][interaction.channel.id] = voice_channel.id
+                
+                try:
+                    target = await interaction.client.fetch_user(applicant_id)
+                    invite = await voice_channel.create_invite(max_age=3600)
+                    dm_embed = discord.Embed(
+                        title="🎙 Приглашение на обзвон",
+                        description=f"Вас приглашают на обзвон в канале {voice_channel.mention}!\n\nСсылка: {invite.url}",
+                        color=discord.Color.blue(),
+                        timestamp=datetime.now(),
+                    )
+                    dm_embed.set_footer(text="DIAMOND", icon_url=_footer(guild.id))
+                    await target.send(embed=dm_embed)
+                except Exception as e:
+                    await interaction.followup.send(f"❌ Не удалось отправить DM пользователю: {e}", ephemeral=True)
+                else:
+                    await interaction.followup.send(f"✅ Голосовой канал создан и приглашение отправлено в DM {applicant_id}.", ephemeral=True)
+                    
+            except Exception as e:
+                await interaction.followup.send(f"❌ Ошибка при создании голосового канала: {e}", ephemeral=True)
+
+        invite_btn.callback = invite_voice_callback
+        
+        # Создаем отдельную View для кнопки обзвона, чтобы не конфликтовать с основной ReviewView
+        class VoiceInviteView(ui.View):
+            def __init__(self):
+                super().__init__(timeout=None)
+                self.add_item(invite_btn)
+        
+        await ticket_channel.send(embed=discord.Embed(description="🎙 **Действие:**", color=discord.Color.blue()), view=VoiceInviteView())
+
 
         sent_embed = discord.Embed(
             title="📬 Заявка отправлена!",

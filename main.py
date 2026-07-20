@@ -184,8 +184,8 @@ feedback_settings: dict = {}
 # { guild_id: { "categories": [cat_id, ...], "excluded_channels": [ch_id, ...], "amount": int } }
 voice_reward_settings: dict = {}
 
-# { guild_id: channel_id }  — голосовой канал для автоподключения при старте
-voice_autoconnect: dict = {}
+# { guild_id: channel_id } — голосовой канал для обзвонов
+interview_channels: dict = {}
 
 # ⚔️ ВЗП МОНИТОРИНГ
 # { guild_id: { "familyId", "familyName", "serverId", "alertChannelId",
@@ -730,6 +730,7 @@ def save_data():
         "roster_members":       {str(g): {str(u): v for u, v in um.items()} for g, um in roster_members.items()},
         "voice_reward_settings": {str(g): v for g, v in voice_reward_settings.items()},
         "voice_autoconnect":     {str(g): v for g, v in voice_autoconnect.items()},
+        "interview_channels":       {str(g): v for g, v in interview_channels.items()},
         "vzp_monitor_config":    {str(g): v for g, v in vzp_monitor_config.items()},
         "vzp_processed_events":  {str(g): v for g, v in vzp_processed_events.items()},
         "cabinet_panels":        {str(g): v for g, v in cabinet_panels.items()},
@@ -913,6 +914,8 @@ def load_data():
             voice_reward_settings[int(g)] = v
         for g, v in data.get("voice_autoconnect", {}).items():
             voice_autoconnect[int(g)] = v
+        for g, v in data.get("interview_channels", {}).items():
+            interview_channels[int(g)] = v
         for g, v in data.get("vzp_monitor_config", {}).items():
             vzp_monitor_config[int(g)] = v
         for g, v in data.get("vzp_processed_events", {}).items():
@@ -1327,10 +1330,21 @@ class ApplicationModal(ui.Modal, title="📋 Подать заявку"):
                     if tm_role:
                         overwrites[tm_role] = discord.PermissionOverwrite(connect=True)
                 
-                voice_channel = await guild.create_voice_channel(
-                    name=f"Обзвон-тикет-{applicant_id}",
-                    overwrites=overwrites
-                )
+                # Используем настроенный канал обзвона, если он есть
+                interview_channel_id = interview_channels.get(guild.id)
+                if interview_channel_id:
+                    voice_channel = guild.get_channel(interview_channel_id)
+                    if not voice_channel:
+                        # Если канал не найден, создаем новый (fallback)
+                        voice_channel = await guild.create_voice_channel(
+                            name=f"Обзвон-тикет-{applicant_id}",
+                            overwrites=overwrites
+                        )
+                else:
+                    voice_channel = await guild.create_voice_channel(
+                        name=f"Обзвон-тикет-{applicant_id}",
+                        overwrites=overwrites
+                    )
                 
                 # В main.py используется глобальный словарь ticket_voice_channels (нужно добавить его объявление если его нет)
                 if 'ticket_voice_channels' not in globals():
@@ -1594,10 +1608,21 @@ class ApplicationReviewView(ui.View):
                         if tm_role:
                             overwrites[tm_role] = discord.PermissionOverwrite(connect=True)
                     
-                    voice_channel = await guild.create_voice_channel(
-                        name=f"Обзвон-тикет-{applicant_id}",
-                        overwrites=overwrites
-                    )
+                    # Используем настроенный канал обзвона, если он есть
+                    interview_channel_id = interview_channels.get(guild.id)
+                    if interview_channel_id:
+                        voice_channel = guild.get_channel(interview_channel_id)
+                        if not voice_channel:
+                            # Если канал не найден, создаем новый (fallback)
+                            voice_channel = await guild.create_voice_channel(
+                                name=f"Обзвон-тикет-{applicant_id}",
+                                overwrites=overwrites
+                            )
+                    else:
+                        voice_channel = await guild.create_voice_channel(
+                            name=f"Обзвон-тикет-{applicant_id}",
+                            overwrites=overwrites
+                        )
                     
                     ticket_voice_channels[interaction.channel.id] = voice_channel.id
                     
@@ -2407,7 +2432,14 @@ async def slash_ticket_viewer_remove(interaction: discord.Interaction, роль:
     await interaction.response.send_message(f"✅ {роль.mention} убрана из доступа к тикетам.", ephemeral=True)
 
 
-@tree.command(name="тикет_пинг", description="Роль, которая тегается в сообщении тикета")
+@tree.command(name="канал_обзвона", description="Установить голосовой канал для приглашений на обзвон")
+@app_commands.describe(канал="Голосовой канал для обзвонов")
+async def slash_interview_channel(interaction: discord.Interaction, канал: discord.VoiceChannel):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+    interview_channels[interaction.guild_id] = канал.id
+    save_data()
+    await interaction.response.send_message(f"✅ Канал для обзвонов установлен: {канал.mention}", ephemeral=True)
 @app_commands.describe(роль="Роль для тега (если не задана — тегается тикет-менеджер)")
 async def slash_ticket_ping(interaction: discord.Interaction, роль: discord.Role):
     if not is_admin(interaction):

@@ -187,6 +187,9 @@ voice_reward_settings: dict = {}
 # { guild_id: channel_id } — голосовой канал для обзвонов
 interview_channels: dict = {}
 
+# { ticket_text_channel_id: voice_channel_id } — войс для обзвона по заявке
+ticket_voice_channels: dict = {}
+
 # ⚔️ ВЗП МОНИТОРИНГ
 # { guild_id: { "familyId", "familyName", "serverId", "alertChannelId",
 #               "resultsChannelId", "mentionRoles", "mentionUsers",
@@ -304,6 +307,14 @@ def format_amount(amount: int) -> str:
 
 
 
+def _format_reserve_block(reserve: list | None) -> str:
+    reserve = reserve or []
+    if not reserve:
+        return f"\n\n**🪑 Резерв (0):**\n*пусто*"
+    lines = [f"`R{str(i).zfill(2)}.` <@{uid}>" for i, uid in enumerate(reserve, 1)]
+    return f"\n\n**🪑 Резерв ({len(reserve)}):**\n" + "\n".join(lines)
+
+
 def build_event_embed(
     guild_id: int,
     title: str,
@@ -336,17 +347,10 @@ def build_event_embed(
     if prefix:
         prefix += "\n"
     if join_mode:
-        description = f"{prefix}Нажми ✅ чтобы записаться\n\n**Участники ({filled}/{max_count}):**\n{text}"
+        description = f"{prefix}Нажми ✅ чтобы записаться · 🪑 резерв если места заняты\n\n**Участники ({filled}/{max_count}):**\n{text}"
     else:
-        description = f"{prefix}Нажми кнопку с нужным номером слота\n\n**Слоты ({filled}/{max_count}):**\n{text}"
-    
-    if reserve:
-        reserve = reserve or []
-        reserve_lines = [f"`R{str(i).zfill(2)}.` <@{uid}>" for i, uid in enumerate(reserve, 1)]
-        description += f"\n\n**🪑 Резерв ({len(reserve)}):**\n" + "\n".join(reserve_lines)
-    elif not join_mode:
-         description += f"\n\n**🪑 Резерв (0):**\n*пусто*"
-
+        description = f"{prefix}Нажми кнопку слота · 🪑 **Резерв** — запасной список\n\n**Слоты ({filled}/{max_count}):**\n{text}"
+    description += _format_reserve_block(reserve)
     if note:
         description += f"\n\n📌 **Заметка:** {note}"
 
@@ -362,12 +366,19 @@ def build_event_embed(
     return embed
 
 
-def build_thread_list(title: str, max_count: int, slots: dict) -> str:
+def build_thread_list(title: str, max_count: int, slots: dict, reserve: list | None = None) -> str:
     filled = sum(1 for v in slots.values() if v is not None)
     lines  = [f"**📋 Список: {title} ({filled}/{max_count})**\n"]
     for i in range(1, max_count + 1):
         uid = slots.get(i)
         lines.append(f"`{str(i).zfill(2)}.` {'<@' + str(uid) + '>' if uid else 'свободно'}")
+    reserve = reserve or []
+    lines.append(f"\n**🪑 Резерв ({len(reserve)}):**")
+    if reserve:
+        for i, uid in enumerate(reserve, 1):
+            lines.append(f"`R{str(i).zfill(2)}.` <@{uid}>")
+    else:
+        lines.append("*пусто*")
     return "\n".join(lines)
 
 
@@ -397,33 +408,41 @@ class KickModal(ui.Modal, title="Кикнуть из списка"):
             return await interaction.response.send_message("❌ Сбор не найден!", ephemeral=True)
 
         slots = data["slots"]
+        reserve = data.setdefault("reserve", [])
+        removed_from = None
         for slot_num, uid in slots.items():
             if uid == target_id:
                 slots[slot_num] = None
-                save_data()
+                removed_from = f"слота **{slot_num}**"
+                break
+        if removed_from is None and target_id in reserve:
+            reserve.remove(target_id)
+            removed_from = "резерва"
 
-                # Обновить основное сообщение
-                try:
-                    channel = bot.get_channel(data["channel_id"])
-                    orig_msg = await channel.fetch_message(self.message_id)
-                    join_mode = data.get("mode") == "join"
-                    embed = build_event_embed(
-                        interaction.guild_id, data["title"], data["max"], slots,
-                        data.get("image_url"), data.get("note"), join_mode=join_mode,
-                        event_time=data.get("event_time"), closed=data.get("closed", False),
-                    )
-                    view = JoinEventView(self.message_id) if join_mode else EventView(self.message_id)
-                    await orig_msg.edit(embed=embed, view=view)
-                except Exception:
-                    pass
+        if removed_from is None:
+            return await interaction.response.send_message(
+                f"❌ Пользователь `{target_id}` не найден в списке!", ephemeral=True
+            )
 
-                await update_thread_list(self.message_id)
-                return await interaction.response.send_message(
-                    f"✅ <@{target_id}> убран из слота **{slot_num}**", ephemeral=True
-                )
+        save_data()
+        try:
+            channel = bot.get_channel(data["channel_id"])
+            orig_msg = await channel.fetch_message(self.message_id)
+            join_mode = data.get("mode") == "join"
+            embed = build_event_embed(
+                interaction.guild_id, data["title"], data["max"], slots,
+                data.get("image_url"), data.get("note"), join_mode=join_mode,
+                event_time=data.get("event_time"), closed=data.get("closed", False),
+                reserve=reserve,
+            )
+            view = JoinEventView(self.message_id) if join_mode else EventView(self.message_id)
+            await orig_msg.edit(embed=embed, view=view)
+        except Exception:
+            pass
 
-        await interaction.response.send_message(
-            f"❌ Пользователь `{target_id}` не найден в списке!", ephemeral=True
+        await update_thread_list(self.message_id)
+        return await interaction.response.send_message(
+            f"✅ <@{target_id}> убран из {removed_from}", ephemeral=True
         )
 
 
@@ -471,6 +490,7 @@ class CloseListButton(ui.Button):
                 interaction.guild_id, data["title"], data["max"], data["slots"],
                 data.get("image_url"), data.get("note"), join_mode=join_mode,
                 event_time=data.get("event_time"), closed=data["closed"],
+                reserve=data.get("reserve", []),
             )
             view = JoinEventView(self.message_id) if join_mode else EventView(self.message_id)
             await orig_msg.edit(embed=embed, view=view)
@@ -500,7 +520,9 @@ async def update_thread_list(message_id: int):
             return
         msg = await thread.fetch_message(data["thread_msg_id"])
         await msg.edit(
-            content=build_thread_list(data["title"], data["max"], data["slots"]),
+            content=build_thread_list(
+                data["title"], data["max"], data["slots"], data.get("reserve", [])
+            ),
             view=ThreadListView(message_id),
         )
     except Exception:
@@ -729,8 +751,8 @@ def save_data():
         "roster_settings":      {str(g): v for g, v in roster_settings.items()},
         "roster_members":       {str(g): {str(u): v for u, v in um.items()} for g, um in roster_members.items()},
         "voice_reward_settings": {str(g): v for g, v in voice_reward_settings.items()},
-        "voice_autoconnect":     {str(g): v for g, v in voice_autoconnect.items()},
         "interview_channels":       {str(g): v for g, v in interview_channels.items()},
+        "ticket_voice_channels": {str(c): v for c, v in ticket_voice_channels.items()},
         "vzp_monitor_config":    {str(g): v for g, v in vzp_monitor_config.items()},
         "vzp_processed_events":  {str(g): v for g, v in vzp_processed_events.items()},
         "cabinet_panels":        {str(g): v for g, v in cabinet_panels.items()},
@@ -885,8 +907,9 @@ def load_data():
         # Сборы
         for mid, ev in data.get("event_lists", {}).items():
             event_lists[int(mid)] = {
-                **{k: v for k, v in ev.items() if k != "slots"},
+                **{k: v for k, v in ev.items() if k not in ("slots", "reserve")},
                 "slots": {int(s): uid for s, uid in ev.get("slots", {}).items()},
+                "reserve": [int(u) for u in ev.get("reserve", [])],
             }
 
         # Панель магазина
@@ -912,10 +935,10 @@ def load_data():
         # Голосовые каналы — начисление
         for g, v in data.get("voice_reward_settings", {}).items():
             voice_reward_settings[int(g)] = v
-        for g, v in data.get("voice_autoconnect", {}).items():
-            voice_autoconnect[int(g)] = v
         for g, v in data.get("interview_channels", {}).items():
             interview_channels[int(g)] = v
+        for c, v in data.get("ticket_voice_channels", {}).items():
+            ticket_voice_channels[int(c)] = int(v)
         for g, v in data.get("vzp_monitor_config", {}).items():
             vzp_monitor_config[int(g)] = v
         for g, v in data.get("vzp_processed_events", {}).items():
@@ -1004,6 +1027,7 @@ class SlotButton(ui.Button):
         user_id = interaction.user.id
         slots   = data["slots"]
 
+        reserve = data.setdefault("reserve", [])
         if slots.get(self.slot_num) == user_id:
             # Покинуть слот
             slots[self.slot_num] = None
@@ -1018,6 +1042,8 @@ class SlotButton(ui.Button):
                 if uid == user_id:
                     slots[s] = None
                     break
+            if user_id in reserve:
+                reserve.remove(user_id)
             slots[self.slot_num] = user_id
             msg_text = f"✅ Вы заняли слот **{self.slot_num}**!"
 
@@ -1027,9 +1053,58 @@ class SlotButton(ui.Button):
             interaction.guild_id, data["title"], data["max"], slots,
             data.get("image_url"), data.get("note"),
             event_time=data.get("event_time"), closed=data.get("closed", False),
+            reserve=reserve,
         )
         await interaction.response.defer()
         await interaction.message.edit(embed=embed, view=new_view)
+        await update_thread_list(self.message_id)
+        await interaction.followup.send(msg_text, ephemeral=True)
+
+
+class ReserveButton(ui.Button):
+    """Кнопка записи в резерв (запасной список)."""
+    def __init__(self, message_id: int):
+        super().__init__(
+            label="Резерв",
+            emoji="🪑",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"reserve_{message_id}",
+        )
+        self.message_id = message_id
+
+    async def callback(self, interaction: discord.Interaction):
+        data = event_lists.get(self.message_id)
+        if not data:
+            return await interaction.response.send_message("❌ Сбор уже недоступен!", ephemeral=True)
+        if data.get("closed"):
+            return await interaction.response.send_message("🔒 Список закрыт!", ephemeral=True)
+
+        user_id = interaction.user.id
+        slots = data["slots"]
+        reserve = data.setdefault("reserve", [])
+        join_mode = data.get("mode") == "join"
+
+        if user_id in reserve:
+            reserve.remove(user_id)
+            msg_text = "❌ Вы покинули **резерв**"
+        else:
+            for s, uid in list(slots.items()):
+                if uid == user_id:
+                    slots[s] = None
+            if user_id not in reserve:
+                reserve.append(user_id)
+            msg_text = "✅ Вы записались в **резерв**!"
+
+        save_data()
+        embed = build_event_embed(
+            interaction.guild_id, data["title"], data["max"], slots,
+            data.get("image_url"), data.get("note"), join_mode=join_mode,
+            event_time=data.get("event_time"), closed=data.get("closed", False),
+            reserve=reserve,
+        )
+        view = JoinEventView(self.message_id) if join_mode else EventView(self.message_id)
+        await interaction.response.defer()
+        await interaction.message.edit(embed=embed, view=view)
         await update_thread_list(self.message_id)
         await interaction.followup.send(msg_text, ephemeral=True)
 
@@ -1044,9 +1119,11 @@ class EventView(ui.View):
         slots     = data.get("slots", {})
         max_count = data.get("max", 0)
 
-        slot_count = min(max_count, 25)
+        # Макс. 24 слота-кнопки + 1 «Резерв» (лимит Discord — 25)
+        slot_count = min(max_count, 24)
         for i in range(1, slot_count + 1):
             self.add_item(SlotButton(i, message_id, slots.get(i)))
+        self.add_item(ReserveButton(message_id))
 
 
 class JoinButton(ui.Button):
@@ -1070,6 +1147,7 @@ class JoinButton(ui.Button):
 
         user_id = interaction.user.id
         slots   = data["slots"]
+        reserve = data.setdefault("reserve", [])
 
         # Уже записан — выйти
         for slot_num, uid in slots.items():
@@ -1080,9 +1158,11 @@ class JoinButton(ui.Button):
                     interaction.guild_id, data["title"], data["max"], slots,
                     data.get("image_url"), data.get("note"), join_mode=True,
                     event_time=data.get("event_time"), closed=data.get("closed", False),
+                    reserve=reserve,
                 )
+                view = JoinEventView(self.message_id)
                 await interaction.response.defer()
-                await interaction.message.edit(embed=embed)
+                await interaction.message.edit(embed=embed, view=view)
                 await update_thread_list(self.message_id)
                 await interaction.followup.send("❌ Вы покинули сбор", ephemeral=True)
                 return
@@ -1090,28 +1170,35 @@ class JoinButton(ui.Button):
         # Найти свободный слот
         for i in range(1, data["max"] + 1):
             if slots.get(i) is None:
+                if user_id in reserve:
+                    reserve.remove(user_id)
                 slots[i] = user_id
                 save_data()
                 embed = build_event_embed(
                     interaction.guild_id, data["title"], data["max"], slots,
                     data.get("image_url"), data.get("note"), join_mode=True,
                     event_time=data.get("event_time"), closed=data.get("closed", False),
+                    reserve=reserve,
                 )
+                view = JoinEventView(self.message_id)
                 await interaction.response.defer()
-                await interaction.message.edit(embed=embed)
+                await interaction.message.edit(embed=embed, view=view)
                 await update_thread_list(self.message_id)
                 await interaction.followup.send("✅ Вы записались в сбор!", ephemeral=True)
                 return
 
-        await interaction.response.send_message("❌ Все места заняты!", ephemeral=True)
+        await interaction.response.send_message(
+            "❌ Все места заняты! Запишись в **🪑 Резерв**.", ephemeral=True
+        )
 
 
 class JoinEventView(ui.View):
-    """View с одной кнопкой ✅. Для сборов с > 25 слотами."""
+    """View с кнопкой ✅ и резервом. Для сборов с > 24 слотами / !list."""
     def __init__(self, message_id: int):
         super().__init__(timeout=None)
         self.message_id = message_id
         self.add_item(JoinButton(message_id))
+        self.add_item(ReserveButton(message_id))
 
 
 # ─────────────────────────────────────────────
@@ -1502,6 +1589,81 @@ class TicketPanelView(ui.View):
         await interaction.response.send_modal(ApplicationModal(self.category_id))
 
 
+async def _ensure_ticket_call_voice(
+    guild: discord.Guild,
+    ticket_channel: discord.abc.GuildChannel,
+    applicant_id: int,
+    manager: discord.Member,
+) -> discord.VoiceChannel:
+    """Создаёт (или возвращает существующий) голосовой канал для обзвона по тикету."""
+    existing_id = ticket_voice_channels.get(ticket_channel.id)
+    if existing_id:
+        vc = guild.get_channel(existing_id)
+        if isinstance(vc, discord.VoiceChannel):
+            return vc
+
+    overwrites: dict = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False, connect=False),
+        guild.me: discord.PermissionOverwrite(
+            view_channel=True, connect=True, manage_channels=True, move_members=True, speak=True
+        ),
+        manager: discord.PermissionOverwrite(
+            view_channel=True, connect=True, speak=True, move_members=True
+        ),
+    }
+
+    applicant = guild.get_member(applicant_id)
+    if applicant is None:
+        try:
+            applicant = await guild.fetch_member(applicant_id)
+        except Exception:
+            applicant = None
+    if applicant:
+        overwrites[applicant] = discord.PermissionOverwrite(
+            view_channel=True, connect=True, speak=True
+        )
+
+    tm_role_id = ticket_manager_roles.get(guild.id)
+    if tm_role_id:
+        tm_role = guild.get_role(tm_role_id)
+        if tm_role:
+            overwrites[tm_role] = discord.PermissionOverwrite(
+                view_channel=True, connect=True, speak=True, move_members=True
+            )
+
+    for rid in ticket_viewer_roles.get(guild.id, []):
+        r = guild.get_role(rid)
+        if r:
+            overwrites[r] = discord.PermissionOverwrite(
+                view_channel=True, connect=True, speak=True
+            )
+
+    name = f"обзвон-{ticket_channel.name}"[:100]
+    vc = await guild.create_voice_channel(
+        name=name,
+        category=getattr(ticket_channel, "category", None),
+        overwrites=overwrites,
+        reason=f"Обзвон по заявке {ticket_channel.name}",
+    )
+    ticket_voice_channels[ticket_channel.id] = vc.id
+    save_data()
+    return vc
+
+
+async def _delete_ticket_call_voice(guild: discord.Guild, ticket_channel_id: int):
+    """Удаляет голосовой канал обзвона, привязанный к тикету."""
+    vc_id = ticket_voice_channels.pop(ticket_channel_id, None)
+    if not vc_id:
+        return
+    save_data()
+    vc = guild.get_channel(vc_id)
+    if isinstance(vc, discord.VoiceChannel):
+        try:
+            await vc.delete(reason="Тикет закрыт — обзвон завершён")
+        except Exception:
+            pass
+
+
 class ApplicationReviewView(ui.View):
     def __init__(self, applicant_id: int = 0):
         super().__init__(timeout=None)
@@ -1515,6 +1677,72 @@ class ApplicationReviewView(ui.View):
             return int(footer.split("• ")[-1].strip())
         except Exception:
             return 0
+
+    @ui.button(label="Пригласить на обзвон", style=discord.ButtonStyle.primary, emoji="🎤", custom_id="ticket_invite_call")
+    async def invite_call(self, interaction: discord.Interaction, button: ui.Button):
+        if not is_ticket_manager(interaction):
+            return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
+
+        applicant_id = self._get_applicant_id(interaction.message)
+        if not applicant_id:
+            return await interaction.response.send_message("❌ Не удалось определить заявителя.", ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        ticket_ch = interaction.channel
+
+        try:
+            vc = await _ensure_ticket_call_voice(guild, ticket_ch, applicant_id, interaction.user)
+        except Exception as e:
+            return await interaction.followup.send(
+                f"❌ Не удалось создать голосовой канал: {e}", ephemeral=True
+            )
+
+        link = f"https://discord.com/channels/{guild.id}/{vc.id}"
+        dm_ok = False
+        try:
+            target = await interaction.client.fetch_user(applicant_id)
+            dm_embed = discord.Embed(
+                title="🎤 Приглашение на обзвон",
+                description=(
+                    f"Тебя пригласили на **обзвон** по заявке в **{guild.name}**.\n\n"
+                    f"Зайди в голосовой канал: **{vc.name}**\n"
+                    f"→ {link}"
+                ),
+                color=discord.Color.blue(),
+                timestamp=datetime.now(),
+            )
+            dm_embed.add_field(name="👮 Пригласил", value=interaction.user.mention, inline=True)
+            dm_embed.set_footer(text="DIAMOND", icon_url=_footer(guild.id))
+            await target.send(embed=dm_embed)
+            dm_ok = True
+        except Exception:
+            pass
+
+        note = discord.Embed(
+            title="🎤 Обзвон",
+            description=(
+                f"{interaction.user.mention} пригласил <@{applicant_id}> на обзвон.\n"
+                f"Канал: {vc.mention}"
+            ),
+            color=discord.Color.blue(),
+            timestamp=datetime.now(),
+        )
+        note.set_footer(text="DIAMOND", icon_url=_footer(guild.id))
+        try:
+            await ticket_ch.send(embed=note)
+        except Exception:
+            pass
+
+        if dm_ok:
+            await interaction.followup.send(
+                f"✅ Приглашение отправлено в ЛС. Канал: {vc.mention}", ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                f"⚠️ Канал создан ({vc.mention}), но ЛС закрыты — напиши заявителю вручную.",
+                ephemeral=True,
+            )
 
     @ui.button(label="✅ Одобрить", style=discord.ButtonStyle.success, custom_id="ticket_approve")
     async def approve(self, interaction: discord.Interaction, button: ui.Button):
@@ -1693,6 +1921,7 @@ class PostCloseView(ui.View):
         if not is_ticket_manager(interaction):
             return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
         await interaction.response.defer(ephemeral=True)
+        await _delete_ticket_call_voice(interaction.guild, interaction.channel.id)
         await asyncio.sleep(3)
         try:
             await interaction.channel.delete(reason=f"Тикет удалён — {interaction.user}")
@@ -1911,7 +2140,7 @@ async def _create_event_message(channel, guild, title: str, max_count: int, imag
 
     event_lists[msg.id] = {
         "title": title, "max": max_count, "mode": "join" if join_mode else "buttons",
-        "slots": slots, "image_url": image_ref, "note": None,
+        "slots": slots, "reserve": [], "image_url": image_ref, "note": None,
         "channel_id": channel.id, "thread_id": None, "thread_msg_id": None,
         "event_time": event_time, "closed": False,
     }
@@ -1921,7 +2150,7 @@ async def _create_event_message(channel, guild, title: str, max_count: int, imag
 
     # Тред с живым списком
     try:
-        hint = "Нажми ✅ в сообщении выше для записи!" if join_mode else "Выбирай слот кнопкой в сообщении выше!"
+        hint = "Нажми ✅ для записи · 🪑 Резерв — запасной список" if join_mode else "Кнопка слота · 🪑 Резерв — запасной список"
         thread = await msg.create_thread(name=f"💬 {title}", auto_archive_duration=1440)
         thread_embed = discord.Embed(
             description=f"📋 Обсуждение сбора **{title}**\n{hint}",
@@ -1929,7 +2158,10 @@ async def _create_event_message(channel, guild, title: str, max_count: int, imag
         )
         thread_embed.set_footer(text="DIAMOND", icon_url=_footer(guild.id))
         await thread.send(embed=thread_embed)
-        list_msg = await thread.send(build_thread_list(title, max_count, slots), view=ThreadListView(msg.id))
+        list_msg = await thread.send(
+            build_thread_list(title, max_count, slots, []),
+            view=ThreadListView(msg.id),
+        )
         event_lists[msg.id]["thread_id"]     = thread.id
         event_lists[msg.id]["thread_msg_id"] = list_msg.id
     except Exception:
@@ -2440,6 +2672,9 @@ async def slash_interview_channel(interaction: discord.Interaction, канал: 
     interview_channels[interaction.guild_id] = канал.id
     save_data()
     await interaction.response.send_message(f"✅ Канал для обзвонов установлен: {канал.mention}", ephemeral=True)
+
+
+@tree.command(name="тикет_пинг", description="Роль, которая тегается в сообщении тикета")
 @app_commands.describe(роль="Роль для тега (если не задана — тегается тикет-менеджер)")
 async def slash_ticket_ping(interaction: discord.Interaction, роль: discord.Role):
     if not is_admin(interaction):
@@ -2931,7 +3166,12 @@ async def замена_cmd(ctx, кого: int, на_кого: int = 0):
         channel = bot.get_channel(data["channel_id"])
         msg = await channel.fetch_message(msg_id)
         join_mode = data.get("mode") == "join"
-        embed = build_event_embed(ctx.guild.id, data["title"], data["max"], slots, data.get("image_url"), data.get("note"), join_mode=join_mode, event_time=data.get("event_time"), closed=data.get("closed", False))
+        embed = build_event_embed(
+            ctx.guild.id, data["title"], data["max"], slots,
+            data.get("image_url"), data.get("note"), join_mode=join_mode,
+            event_time=data.get("event_time"), closed=data.get("closed", False),
+            reserve=data.get("reserve", []),
+        )
         view = JoinEventView(msg_id) if join_mode else EventView(msg_id)
         await msg.edit(embed=embed, view=view)
     except Exception:
@@ -4195,8 +4435,12 @@ async def on_ready():
         cat_id = panel.get("category_id")
         if cat_id:
             bot.add_view(TicketPanelView(cat_id))
-    for message_id in event_lists:
+    for message_id, ev in event_lists.items():
         bot.add_view(ThreadListView(message_id))
+        if ev.get("mode") == "join":
+            bot.add_view(JoinEventView(message_id))
+        else:
+            bot.add_view(EventView(message_id))
     await tree.sync()
     print(f"Bot online: {bot.user} (ID: {bot.user.id})")
     await bot.change_presence(activity=discord.Activity(
@@ -4215,14 +4459,6 @@ async def on_ready():
         inactive_expire_loop.start()
     if not vzp_monitor_loop.is_running():
         vzp_monitor_loop.start()
-    # Подключение к голосовым каналам при старте
-    for gid, ch_id in list(voice_autoconnect.items()):
-        try:
-            ch = bot.get_channel(ch_id)
-            if ch and isinstance(ch, discord.VoiceChannel):
-                await ch.connect()
-        except Exception as e:
-            print(f"WARNING: Could not auto-connect to voice channel {ch_id}: {e}")
     for gid in list(roster_settings.keys()):
         guild = bot.get_guild(gid)
         if guild:
@@ -6394,62 +6630,19 @@ async def slash_top(interaction: discord.Interaction, категория: str = 
 
 
 # ═══════════════════════════════════════════════════════════════
-# 📋 СИСТЕМА СОСТАВА СЕМЬИ
+# 📋 СИСТЕМА СОСТАВА СЕМЬИ (основной + академия)
 # ═══════════════════════════════════════════════════════════════
 
-FACTIONS = {
-    "LSV":   ("Los Santos Vagos",               "🟡"),
-    "BSG":   ("Bloods Street Gang",             "🔴"),
-    "MG13":  ("Marabunta Grande 13",            "🟣"),
-    "WSF":   ("West Side Front",                "🟢"),
-    "ESB":   ("East Side Ballas",               "🟠"),
-    "LSSD":  ("Sheriff Department",             "🛡️"),
-    "LSPD":  ("Police Department",              "🚔"),
-    "FIB":   ("Federal Investigation Bureau",   "🕵️"),
-    "GOV":   ("Government",                     "🏛️"),
-    "EMS":   ("Emergency Medical Services",     "🚑"),
-    "SASPA": ("San Andreas State Prison Authority", "⛓️"),
-    "ARMY":  ("San Andreas National Guard",     "🪖"),
-    "MEX":   ("Mexican Mafia",                  "🌵"),
-    "LCN":   ("La Cosa Nostra",                 "🤌"),
-    "RM":    ("Russian Mafia",                  "🐻"),
-    "ARM":   ("Armenian Mafia",                 "⚔️"),
-    "YAK":   ("Yakuza",                         "🗡️"),
-}
-NO_FACTION_KEY = "none"
-
-
-def _faction_display(guild: discord.Guild, faction_key: str | None) -> str:
-    if not faction_key or faction_key == NO_FACTION_KEY:
-        afk_emoji = discord.utils.get(guild.emojis, name="afk")
-        prefix = str(afk_emoji) + " " if afk_emoji else "😴 "
-        return f"{prefix}Без фракции"
-    entry = FACTIONS.get(faction_key)
-    if not entry:
-        return faction_key
-    full, default_emoji = entry
-    custom = discord.utils.get(guild.emojis, name=faction_key)
-    prefix = (str(custom) + " ") if custom else (default_emoji + " ")
-    return f"{prefix}{full}"
-
-
-def _has_roster_access(interaction: discord.Interaction) -> bool:
-    if is_admin(interaction):
-        return True
-    cfg = roster_settings.get(interaction.guild_id, {})
-    access_ids = set(cfg.get("access_role_ids", []))
-    return any(r.id in access_ids for r in interaction.user.roles)
-
-
-def _chunk_lines(lines: list, chunk_size: int = 10) -> list[list]:
+def _chunk_lines(lines: list, chunk_size: int = 15) -> list[list]:
     if not lines:
         return [[]]
-    return [lines[i:i+chunk_size] for i in range(0, len(lines), chunk_size)]
+    return [lines[i:i + chunk_size] for i in range(0, len(lines), chunk_size)]
 
 
-async def _collect_roster_lines(guild: discord.Guild):
-    cfg             = roster_settings.get(guild.id, {})
-    member_role_id  = cfg.get("member_role_id")
+async def _collect_roster_members(guild: discord.Guild):
+    """Собирает участников по ролям основного состава и академии."""
+    cfg = roster_settings.get(guild.id, {})
+    member_role_id = cfg.get("member_role_id")
     academy_role_id = cfg.get("academy_role_id")
 
     members_list = guild.members
@@ -6459,271 +6652,284 @@ async def _collect_roster_lines(guild: discord.Guild):
         except Exception:
             members_list = guild.members
 
-    members_data  = roster_members.get(guild.id, {})
-    full_lines    = []
-    academy_lines = []
+    main_members = []
+    academy_members = []
 
     for member in members_list:
         if member.bot:
             continue
-        role_ids    = {r.id for r in member.roles}
-        has_member  = member_role_id  and (member_role_id  in role_ids)
+        role_ids = {r.id for r in member.roles}
+        has_member = member_role_id and (member_role_id in role_ids)
         has_academy = academy_role_id and (academy_role_id in role_ids)
-        if not has_member and not has_academy:
-            continue
+        if has_member:
+            main_members.append(member)
+        elif has_academy:
+            academy_members.append(member)
 
-        ud       = members_data.get(member.id, {})
-        in_org   = ud.get("in_org", False)
-        faction  = ud.get("faction", None)
-        org_icon = "✅" if in_org else "❌"
-        frac_str = _faction_display(guild, faction)
-        line     = f"• {member.mention}\n  Организация: {org_icon} | {frac_str}"
+    # Стабильный порядок: по display_name
+    main_members.sort(key=lambda m: m.display_name.lower())
+    academy_members.sort(key=lambda m: m.display_name.lower())
+    return main_members, academy_members
 
-        if has_academy and not has_member:
-            academy_lines.append(line)
-        else:
-            full_lines.append(line)
 
-    return full_lines, academy_lines
+def _roster_lines(members: list) -> list[str]:
+    return [f"`{str(i).zfill(2)}.` {m.mention}" for i, m in enumerate(members, 1)]
+
+
+def build_roster_embed(
+    guild: discord.Guild,
+    main_members: list,
+    academy_members: list,
+    page: str = "main",
+    page_idx: int = 0,
+) -> discord.Embed:
+    """Красивый embed состава: страница main или academy."""
+    main_lines = _roster_lines(main_members)
+    acad_lines = _roster_lines(academy_members)
+    main_pages = _chunk_lines(main_lines, 20)
+    acad_pages = _chunk_lines(acad_lines, 20)
+
+    if page == "academy":
+        pages = acad_pages
+        page_idx = max(0, min(page_idx, len(pages) - 1))
+        body = "\n".join(pages[page_idx]) if pages[page_idx] else "*Пока никого*"
+        embed = discord.Embed(
+            title=f"🎓 Академия — {len(academy_members)}",
+            description=body,
+            color=discord.Color.blurple(),
+            timestamp=datetime.now(),
+        )
+    else:
+        pages = main_pages
+        page_idx = max(0, min(page_idx, len(pages) - 1))
+        body = "\n".join(pages[page_idx]) if pages[page_idx] else "*Пока никого*"
+        embed = discord.Embed(
+            title=f"🏅 Основной состав — {len(main_members)}",
+            description=body,
+            color=discord.Color.gold(),
+            timestamp=datetime.now(),
+        )
+
+    total = len(main_members) + len(academy_members)
+    embed.add_field(name="🏅 Основной", value=str(len(main_members)), inline=True)
+    embed.add_field(name="🎓 Академия", value=str(len(academy_members)), inline=True)
+    embed.add_field(name="📊 Всего", value=str(total), inline=True)
+    if len(pages) > 1:
+        embed.set_footer(
+            text=f"DIAMOND • стр. {page_idx + 1}/{len(pages)} • Всего: {total}",
+            icon_url=_footer(guild.id),
+        )
+    else:
+        embed.set_footer(text=f"DIAMOND • Всего: {total}", icon_url=_footer(guild.id))
+    return embed
+
+
+class RosterView(ui.View):
+    """Переключатель Основной / Академия + пагинация."""
+
+    def __init__(
+        self,
+        guild: discord.Guild,
+        main_members: list,
+        academy_members: list,
+        page: str = "main",
+        page_idx: int = 0,
+    ):
+        super().__init__(timeout=180)
+        self.guild = guild
+        self.main_members = main_members
+        self.academy_members = academy_members
+        self.page = page
+        self.page_idx = page_idx
+        self._sync_buttons()
+
+    def _page_count(self) -> int:
+        lines = _roster_lines(
+            self.main_members if self.page == "main" else self.academy_members
+        )
+        return max(1, len(_chunk_lines(lines, 20)))
+
+    def _sync_buttons(self):
+        for item in list(self.children):
+            self.remove_item(item)
+
+        main_btn = ui.Button(
+            label=f"🏅 Основной ({len(self.main_members)})",
+            style=discord.ButtonStyle.primary if self.page == "main" else discord.ButtonStyle.secondary,
+            row=0,
+        )
+        acad_btn = ui.Button(
+            label=f"🎓 Академия ({len(self.academy_members)})",
+            style=discord.ButtonStyle.primary if self.page == "academy" else discord.ButtonStyle.secondary,
+            row=0,
+        )
+        prev_btn = ui.Button(
+            label="◀",
+            style=discord.ButtonStyle.secondary,
+            disabled=self.page_idx <= 0,
+            row=1,
+        )
+        next_btn = ui.Button(
+            label="▶",
+            style=discord.ButtonStyle.secondary,
+            disabled=self.page_idx >= self._page_count() - 1,
+            row=1,
+        )
+        refresh_btn = ui.Button(label="🔄", style=discord.ButtonStyle.secondary, row=1)
+
+        async def go_main(interaction: discord.Interaction):
+            self.page = "main"
+            self.page_idx = 0
+            self._sync_buttons()
+            await interaction.response.edit_message(embed=self.embed(), view=self)
+
+        async def go_acad(interaction: discord.Interaction):
+            self.page = "academy"
+            self.page_idx = 0
+            self._sync_buttons()
+            await interaction.response.edit_message(embed=self.embed(), view=self)
+
+        async def go_prev(interaction: discord.Interaction):
+            self.page_idx = max(0, self.page_idx - 1)
+            self._sync_buttons()
+            await interaction.response.edit_message(embed=self.embed(), view=self)
+
+        async def go_next(interaction: discord.Interaction):
+            self.page_idx = min(self._page_count() - 1, self.page_idx + 1)
+            self._sync_buttons()
+            await interaction.response.edit_message(embed=self.embed(), view=self)
+
+        async def do_refresh(interaction: discord.Interaction):
+            self.main_members, self.academy_members = await _collect_roster_members(interaction.guild)
+            self.page_idx = min(self.page_idx, self._page_count() - 1)
+            self._sync_buttons()
+            await interaction.response.edit_message(embed=self.embed(), view=self)
+
+        main_btn.callback = go_main
+        acad_btn.callback = go_acad
+        prev_btn.callback = go_prev
+        next_btn.callback = go_next
+        refresh_btn.callback = do_refresh
+        self.add_item(main_btn)
+        self.add_item(acad_btn)
+        self.add_item(prev_btn)
+        self.add_item(next_btn)
+        self.add_item(refresh_btn)
+
+    def embed(self) -> discord.Embed:
+        return build_roster_embed(
+            self.guild, self.main_members, self.academy_members, self.page, self.page_idx
+        )
 
 
 async def _refresh_roster(guild: discord.Guild):
-    cfg   = roster_settings.get(guild.id, {})
+    """Обновляет закреплённую панель состава в настроенном канале."""
+    cfg = roster_settings.get(guild.id, {})
     ch_id = cfg.get("channel_id")
     if not ch_id:
         return
     try:
         ch = guild.get_channel(ch_id)
+        if not ch:
+            return
         old_id = cfg.get("message_id")
         if old_id:
             try:
                 await (await ch.fetch_message(old_id)).delete()
             except Exception:
                 pass
-        full_lines, academy_lines = await _collect_roster_lines(guild)
-        view = RosterPaginationView(guild, full_lines, academy_lines)
-        msg  = await ch.send(embed=view.current_embed(), view=view)
+        main_m, acad_m = await _collect_roster_members(guild)
+        view = RosterView(guild, main_m, acad_m)
+        msg = await ch.send(embed=view.embed(), view=view)
         cfg["message_id"] = msg.id
         save_data()
     except Exception:
         pass
 
 
-class RosterPaginationView(ui.View):
-    PAGE = 10
-
-    def __init__(self, guild: discord.Guild, full_lines: list, academy_lines: list, idx: int = 0):
-        super().__init__(timeout=None)
-        self.guild         = guild
-        self.full_lines    = full_lines
-        self.academy_lines = academy_lines
-        self.full_pages    = _chunk_lines(full_lines,    self.PAGE)
-        self.acad_pages    = _chunk_lines(academy_lines, self.PAGE)
-        self.total         = len(self.full_pages) + len(self.acad_pages)
-        self.idx           = max(0, min(idx, self.total - 1))
-        self.add_item(RosterOrgSelect())
-        self.add_item(RosterFracUserSelect())
-        self._add_nav()
-
-    def _add_nav(self):
-        for item in list(self.children):
-            if isinstance(item, ui.Button):
-                self.remove_item(item)
-        fp = len(self.full_pages)
-        ap = len(self.acad_pages)
-        if self.idx < fp:
-            counter = f"{self.idx + 1} / {fp}  (Участники)" if fp > 1 else "Участники"
-        else:
-            ai = self.idx - fp
-            counter = f"{ai + 1} / {ap}  (Академия)" if ap > 1 else "Академия"
-
-        prev_btn = ui.Button(label="◀ Назад",   style=discord.ButtonStyle.secondary, disabled=self.idx == 0, row=2)
-        page_btn = ui.Button(label=counter,      style=discord.ButtonStyle.primary,   disabled=True,          row=2)
-        next_btn = ui.Button(label="Вперёд ▶",  style=discord.ButtonStyle.secondary, disabled=self.idx >= self.total - 1, row=2)
-        prev_btn.callback = self._go_prev
-        next_btn.callback = self._go_next
-        self.add_item(prev_btn)
-        self.add_item(page_btn)
-        self.add_item(next_btn)
-
-    def current_embed(self) -> discord.Embed:
-        footer_icon = _footer(self.guild.id)
-        fp = len(self.full_pages)
-        if self.idx < fp:
-            page  = self.full_pages[self.idx]
-            title = f"🏅 Участники  [{len(self.full_lines)}]"
-            color = discord.Color.dark_gold()
-            empty = "*Нет участников*"
-        else:
-            ai    = self.idx - fp
-            page  = self.acad_pages[ai]
-            title = f"🎓 Академия  [{len(self.academy_lines)}]"
-            color = discord.Color.blue()
-            empty = "*Нет академиков*"
-        embed = discord.Embed(
-            title=title,
-            description="\n\n".join(page) if page else empty,
-            color=color,
-            timestamp=datetime.now(),
-        )
-        embed.set_footer(
-            text=f"DIAMOND • Участников: {len(self.full_lines)} | Академиков: {len(self.academy_lines)}",
-            icon_url=footer_icon,
-        )
-        return embed
-
-    async def _go_prev(self, interaction: discord.Interaction):
-        self.idx = max(0, self.idx - 1)
-        self._add_nav()
-        await interaction.response.edit_message(embed=self.current_embed(), view=self)
-
-    async def _go_next(self, interaction: discord.Interaction):
-        self.idx = min(self.total - 1, self.idx + 1)
-        self._add_nav()
-        await interaction.response.edit_message(embed=self.current_embed(), view=self)
-
-
-class RosterOrgSelect(ui.UserSelect):
-    def __init__(self):
-        super().__init__(
-            placeholder="🏢 Орг ✅/❌ — выбери участника",
-            min_values=1, max_values=1, row=0,
-            custom_id="roster_org_select",
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        if not _has_roster_access(interaction):
-            return await interaction.response.send_message("❌ Нет доступа!", ephemeral=True)
-        target = self.values[0]
-        gid    = interaction.guild_id
-        roster_members.setdefault(gid, {}).setdefault(target.id, {"in_org": False, "faction": None})
-        ud           = roster_members[gid][target.id]
-        ud["in_org"] = not ud["in_org"]
-        save_data()
-        await _refresh_roster(interaction.guild)
-        status = "✅ в организации" if ud["in_org"] else "❌ не в организации"
-        await interaction.response.send_message(f"{target.mention} теперь **{status}**", ephemeral=True)
-
-
-class RosterFracUserSelect(ui.UserSelect):
-    def __init__(self):
-        super().__init__(
-            placeholder="⚔️ Фракция — выбери участника",
-            min_values=1, max_values=1, row=1,
-            custom_id="roster_frac_user_select",
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        if not _has_roster_access(interaction):
-            return await interaction.response.send_message("❌ Нет доступа!", ephemeral=True)
-        target = self.values[0]
-        await interaction.response.send_message(
-            f"Выбери фракцию для {target.mention}:",
-            view=RosterFracPickView(target.id),
-            ephemeral=True,
-        )
-
-
-class RosterFracSelect(ui.Select):
-    def __init__(self, target_id: int):
-        self.target_id = target_id
-        options = [
-            discord.SelectOption(label="Без фракции", value=NO_FACTION_KEY, emoji="😴"),
-        ] + [
-            discord.SelectOption(label=f"{short} — {full}", value=short, emoji=emoji)
-            for short, (full, emoji) in FACTIONS.items()
-        ]
-        super().__init__(
-            placeholder="Выбери фракцию...",
-            options=options[:25],
-            row=0,
-            custom_id=f"roster_frac_pick_{target_id}",
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        gid     = interaction.guild_id
-        faction = self.values[0]
-        roster_members.setdefault(gid, {}).setdefault(self.target_id, {"in_org": False, "faction": None})
-        roster_members[gid][self.target_id]["faction"] = faction if faction != NO_FACTION_KEY else None
-        save_data()
-        await _refresh_roster(interaction.guild)
-        frac_str = _faction_display(interaction.guild, faction if faction != NO_FACTION_KEY else None)
-        await interaction.response.send_message(f"<@{self.target_id}> → {frac_str}", ephemeral=True)
-
-
-class RosterFracPickView(ui.View):
-    def __init__(self, target_id: int):
-        super().__init__(timeout=60)
-        self.add_item(RosterFracSelect(target_id))
-
-
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
-    cfg             = roster_settings.get(after.guild.id, {})
-    member_role_id  = cfg.get("member_role_id")
+    cfg = roster_settings.get(after.guild.id, {})
+    member_role_id = cfg.get("member_role_id")
     academy_role_id = cfg.get("academy_role_id")
     if not member_role_id and not academy_role_id:
         return
     before_ids = {r.id for r in before.roles}
-    after_ids  = {r.id for r in after.roles}
-    watch_ids  = set(filter(None, [member_role_id, academy_role_id]))
+    after_ids = {r.id for r in after.roles}
+    watch_ids = set(filter(None, [member_role_id, academy_role_id]))
     if watch_ids & (before_ids ^ after_ids):
         await _refresh_roster(after.guild)
 
 
-@tree.command(name="состав_настройка", description="Настроить роли и канал для состава семьи")
+@tree.command(name="состав_настройка", description="Настроить роли и канал панели состава")
 @app_commands.describe(
-    роль_участника="Роль полноценных участников",
-    роль_академии="Роль академиков",
-    канал="Канал где будет жить состав",
+    роль_участника="Роль основного состава",
+    роль_академии="Роль академии",
+    канал="Канал для живой панели (необязательно — только /состав)",
 )
 @app_commands.default_permissions(administrator=True)
 async def slash_roster_setup(
     interaction: discord.Interaction,
     роль_участника: discord.Role,
     роль_академии: discord.Role,
-    канал: discord.TextChannel,
+    канал: discord.TextChannel = None,
 ):
     if not is_admin(interaction):
         return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
     await interaction.response.defer(ephemeral=True)
     gid = interaction.guild_id
     cfg = roster_settings.setdefault(gid, {})
-    cfg["member_role_id"]  = роль_участника.id
+    cfg["member_role_id"] = роль_участника.id
     cfg["academy_role_id"] = роль_академии.id
-    cfg["channel_id"]      = канал.id
-    await _refresh_roster(interaction.guild)
-    await interaction.followup.send(f"✅ Состав настроен! Панель отправлена в {канал.mention}", ephemeral=True)
+    if канал:
+        cfg["channel_id"] = канал.id
+        await _refresh_roster(interaction.guild)
+        await interaction.followup.send(
+            f"✅ Состав настроен.\n"
+            f"🏅 Основной: {роль_участника.mention}\n"
+            f"🎓 Академия: {роль_академии.mention}\n"
+            f"📢 Панель: {канал.mention}",
+            ephemeral=True,
+        )
+    else:
+        save_data()
+        await interaction.followup.send(
+            f"✅ Роли состава сохранены.\n"
+            f"🏅 Основной: {роль_участника.mention}\n"
+            f"🎓 Академия: {роль_академии.mention}\n"
+            f"Панель канала не задана — используй `/состав` или укажи канал.",
+            ephemeral=True,
+        )
 
 
-@tree.command(name="состав_доступ", description="Добавить/убрать роль с доступом к изменению состава")
-@app_commands.describe(роль="Роль которой разрешить управление составом")
+@tree.command(name="состав_обновить", description="Обновить панель состава в настроенном канале")
 @app_commands.default_permissions(administrator=True)
-async def slash_roster_access(interaction: discord.Interaction, роль: discord.Role):
+async def slash_roster_refresh(interaction: discord.Interaction):
     if not is_admin(interaction):
         return await interaction.response.send_message("❌ Недостаточно прав!", ephemeral=True)
-    gid  = interaction.guild_id
-    cfg  = roster_settings.setdefault(gid, {})
-    ids  = cfg.setdefault("access_role_ids", [])
-    if роль.id in ids:
-        ids.remove(роль.id)
-        action = "убрана из"
-    else:
-        ids.append(роль.id)
-        action = "добавлена в"
-    save_data()
-    await interaction.response.send_message(
-        f"✅ Роль {роль.mention} **{action}** доступа к управлению составом.", ephemeral=True
-    )
+    cfg = roster_settings.get(interaction.guild_id, {})
+    if not cfg.get("channel_id"):
+        return await interaction.response.send_message(
+            "❌ Канал панели не задан. Используй `/состав_настройка` с параметром канал.",
+            ephemeral=True,
+        )
+    await interaction.response.defer(ephemeral=True)
+    await _refresh_roster(interaction.guild)
+    await interaction.followup.send("✅ Панель состава обновлена.", ephemeral=True)
 
 
-@tree.command(name="состав", description="Показать состав семьи")
+@tree.command(name="состав", description="Показать состав семьи (основной + академия)")
 async def slash_roster(interaction: discord.Interaction):
+    cfg = roster_settings.get(interaction.guild_id, {})
+    if not cfg.get("member_role_id") and not cfg.get("academy_role_id"):
+        return await interaction.response.send_message(
+            "❌ Состав ещё не настроен. Админ: `/состав_настройка`.",
+            ephemeral=True,
+        )
     await interaction.response.defer()
-    full_lines, academy_lines = await _collect_roster_lines(interaction.guild)
-    view  = RosterPaginationView(interaction.guild, full_lines, academy_lines)
-    embed = view.current_embed()
-    await interaction.followup.send(embed=embed, view=view)
+    main_m, acad_m = await _collect_roster_members(interaction.guild)
+    view = RosterView(interaction.guild, main_m, acad_m)
+    await interaction.followup.send(embed=view.embed(), view=view)
 
 
 # ─────────────────────────────────────────────

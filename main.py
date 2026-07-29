@@ -502,10 +502,95 @@ class CloseListButton(ui.Button):
         await interaction.response.send_message(f"✅ Список **{status}**!", ephemeral=True)
 
 
+class PromoteFromReserveModal(ui.Modal, title="Убрать с резерва в основу"):
+    user_id = ui.TextInput(
+        label="ID пользователя",
+        placeholder="Вставь Discord ID (например: 123456789012345678)",
+        min_length=17,
+        max_length=20,
+    )
+
+    def __init__(self, message_id: int):
+        super().__init__()
+        self.message_id = message_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not is_admin(interaction):
+            return await interaction.response.send_message("❌ Нет прав!", ephemeral=True)
+
+        try:
+            target_id = int(str(self.user_id).strip())
+        except ValueError:
+            return await interaction.response.send_message("❌ Некорректный ID!", ephemeral=True)
+
+        data = event_lists.get(self.message_id)
+        if not data:
+            return await interaction.response.send_message("❌ Сбор не найден!", ephemeral=True)
+
+        slots = data["slots"]
+        reserve = data.setdefault("reserve", [])
+        if target_id not in reserve:
+            return await interaction.response.send_message(
+                f"❌ Пользователь `{target_id}` не найден в резерве!", ephemeral=True
+            )
+
+        free_slot = None
+        for i in range(1, data["max"] + 1):
+            if slots.get(i) is None:
+                free_slot = i
+                break
+
+        if free_slot is None:
+            return await interaction.response.send_message(
+                "❌ Нет свободных слотов в основе!", ephemeral=True
+            )
+
+        reserve.remove(target_id)
+        slots[free_slot] = target_id
+        save_data()
+
+        try:
+            channel = bot.get_channel(data["channel_id"])
+            orig_msg = await channel.fetch_message(self.message_id)
+            join_mode = data.get("mode") == "join"
+            embed = build_event_embed(
+                interaction.guild_id, data["title"], data["max"], slots,
+                data.get("image_url"), data.get("note"), join_mode=join_mode,
+                event_time=data.get("event_time"), closed=data.get("closed", False),
+                reserve=reserve,
+            )
+            view = JoinEventView(self.message_id) if join_mode else EventView(self.message_id)
+            await orig_msg.edit(embed=embed, view=view)
+        except Exception:
+            pass
+
+        await update_thread_list(self.message_id)
+        return await interaction.response.send_message(
+            f"✅ <@{target_id}> перенесён из резерва в слот **{free_slot}**", ephemeral=True
+        )
+
+
+class PromoteFromReserveButton(ui.Button):
+    def __init__(self, message_id: int):
+        super().__init__(
+            label="Убрать с резерва в основу",
+            emoji="⬆️",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"promote_from_reserve_{message_id}",
+        )
+        self.message_id = message_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if not is_admin(interaction):
+            return await interaction.response.send_message("❌ Только для администраторов!", ephemeral=True)
+        await interaction.response.send_modal(PromoteFromReserveModal(self.message_id))
+
+
 class ThreadListView(ui.View):
     def __init__(self, message_id: int):
         super().__init__(timeout=None)
         self.add_item(KickButton(message_id))
+        self.add_item(PromoteFromReserveButton(message_id))
         data = event_lists.get(message_id)
         self.add_item(CloseListButton(message_id, (data or {}).get("closed", False)))
 
@@ -4429,6 +4514,44 @@ def _vzp_mentions(guild_id: int) -> str:
     return " ".join(parts)
 
 
+def _vzp_ts(value) -> int | None:
+    """API отдаёт время как ISO8601 ('2026-07-29T14:29:30.000Z'), а не unix timestamp."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    try:
+        return int(datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp())
+    except Exception:
+        return None
+
+
+# Внутренние коды точек ВЗП → читаемое название района (собрано по /stats/organizations/{id}/history)
+VZP_DISTRICT_NAMES = {
+    "STABCITY":                 "Байкерка",
+    "EL_RANCHO_SMALL_OILBASE":  "Малая нефть",
+    "BANNING_ANGAR":            "Мясо",
+    "SANDYSHORES":              "Сенди Шорс",
+    "GHETTO_ANTS":              "Муравейник",
+    "NICOLA_PLACE":             "Тупик Миррор",
+    "PUERTA_DUMP":              "Мусорка",
+    "ELBURRO":                  "Татушка",
+    "WINDFARM":                 "Ветряки",
+    "PB_LUMBER":                "Лесопилка",
+    "PALETOBAY":                "Палето Бей",
+    "MIRROR_PARK":              "Миррор Парк",
+}
+
+
+def _vzp_map_name(event: dict) -> str:
+    """'NEW_S_STABCITY' + pointName 'White Water AC' → 'White Water AC — Байкерка'."""
+    point = event.get("pointName") or "?"
+    code = event.get("map") or ""
+    key = re.sub(r"^NEW_[SB]_", "", code)
+    district = VZP_DISTRICT_NAMES.get(key)
+    return f"{point} — {district}" if district else point
+
+
 def _duration_str(start_ts, end_ts) -> str:
     try:
         secs = int(end_ts) - int(start_ts)
@@ -4445,7 +4568,7 @@ def _player_table(players: list) -> str:
     sep = "─" * len(header)
     rows = [header, sep]
     for p in sorted(players, key=lambda x: x.get("kills", 0), reverse=True):
-        name = str(p.get("characterName") or p.get("name") or "?")[:20]
+        name = str(p.get("charName") or p.get("characterName") or p.get("name") or "?")[:20]
         k    = p.get("kills", 0)
         dmg  = p.get("damage", 0)
         hit  = f"{p.get('hitPercent', 0):.1f}"
@@ -4462,14 +4585,14 @@ async def _send_war_started(guild_id: int, event: dict):
     if not ch:
         return
 
-    family_id = cfg["familyId"]
-    atk = event.get("attackerOrganization") or {}
-    def_ = event.get("defenderOrganization") or {}
-    our_side = "ATK ⚔️" if atk.get("id") == family_id else "DEF 🛡️"
-    opponent = def_.get("name", "?") if atk.get("id") == family_id else atk.get("name", "?")
+    family_name = cfg.get("familyName")
+    atk_name = event.get("attackerName", "?")
+    def_name = event.get("defenderName", "?")
+    our_side = "ATK ⚔️" if atk_name == family_name else "DEF 🛡️"
+    opponent = def_name if atk_name == family_name else atk_name
 
-    ts = event.get("startedAt")
-    ts_str = f"<t:{int(ts)}:T>" if ts else "—"
+    ts = _vzp_ts(event.get("startedAt"))
+    ts_str = f"<t:{ts}:T>" if ts else "—"
 
     embed = discord.Embed(
         title=f"⚔️ ВОЙНА НАЧАЛАСЬ — {event.get('pointName', '?')}",
@@ -4478,7 +4601,7 @@ async def _send_war_started(guild_id: int, event: dict):
     )
     embed.add_field(name="Наша роль",     value=our_side,                         inline=True)
     embed.add_field(name="Противник",     value=opponent,                         inline=True)
-    embed.add_field(name="Карта",         value=event.get("mapName", "?"),        inline=True)
+    embed.add_field(name="Карта",         value=_vzp_map_name(event),             inline=True)
     embed.add_field(name="Макс. игроков", value=str(event.get("maxPlayers", "?")),inline=True)
     embed.add_field(name="Начало",        value=ts_str,                           inline=True)
     embed.set_footer(text="vzp-gta5rp.com")
@@ -4495,43 +4618,44 @@ async def _send_war_result(guild_id: int, event: dict):
     if not ch:
         return
 
-    family_id = cfg["familyId"]
-    atk    = event.get("attackerOrganization") or {}
-    def_   = event.get("defenderOrganization") or {}
-    winner = event.get("winnerOrganization")   or {}
+    family_name = cfg.get("familyName")
+    atk_name    = event.get("attackerName", "?")
+    def_name    = event.get("defenderName", "?")
+    winner_name = event.get("winnerName")
 
-    we_won = (winner.get("id") == family_id)
+    we_won = (winner_name == family_name)
     color  = 0x57F287 if we_won else 0xED4245
     title  = ("✅ ПОБЕДА" if we_won else "❌ ПОРАЖЕНИЕ") + f" — {event.get('pointName','?')}"
 
-    start_ts = event.get("startedAt")
-    end_ts   = event.get("endedAt")
+    start_ts = _vzp_ts(event.get("startedAt"))
+    end_ts   = _vzp_ts(event.get("endedAt"))
     duration = _duration_str(start_ts, end_ts)
-    start_str = f"<t:{int(start_ts)}:t>" if start_ts else "—"
-    end_str   = f"<t:{int(end_ts)}:t>"   if end_ts   else "—"
+    start_str = f"<t:{start_ts}:t>" if start_ts else "—"
+    end_str   = f"<t:{end_ts}:t>"   if end_ts   else "—"
 
     embed = discord.Embed(title=title, color=color, timestamp=datetime.now())
-    embed.add_field(name="Атака",      value=atk.get("name","?"),    inline=True)
-    embed.add_field(name="Защита",     value=def_.get("name","?"),   inline=True)
-    embed.add_field(name="Победитель", value=winner.get("name","?"), inline=True)
-    embed.add_field(name="Длительность", value=duration,             inline=True)
+    embed.add_field(name="Атака",      value=atk_name,           inline=True)
+    embed.add_field(name="Защита",     value=def_name,           inline=True)
+    embed.add_field(name="Победитель", value=winner_name or "?", inline=True)
+    embed.add_field(name="Карта",      value=_vzp_map_name(event), inline=True)
+    embed.add_field(name="Длительность", value=duration,           inline=True)
 
-    atk_players = event.get("attackerPlayers") or []
-    def_players = event.get("defenderPlayers") or []
-    our_players   = atk_players if atk.get("id") == family_id else def_players
-    enemy_players = def_players if atk.get("id") == family_id else atk_players
+    atk_players = event.get("attackers") or []
+    def_players = event.get("defenders") or []
+    our_players   = atk_players if atk_name == family_name else def_players
+    enemy_players = def_players if atk_name == family_name else atk_players
 
     def _s(lst, key): return sum(p.get(key, 0) for p in lst)
 
-    our_label = f"Наша команда ({'ATK' if atk.get('id') == family_id else 'DEF'})"
+    our_label = f"Наша команда ({'ATK' if atk_name == family_name else 'DEF'})"
     embed.add_field(
         name=our_label,
-        value=f"K: **{_s(our_players,'kills')}** | DMG: **{_s(our_players,'damage')}** | HS: **{_s(our_players,'headshots')}**",
+        value=f"K: **{_s(our_players,'kills')}** | DMG: **{_s(our_players,'damage')}**",
         inline=False,
     )
     embed.add_field(
         name="Противник",
-        value=f"K: **{_s(enemy_players,'kills')}** | DMG: **{_s(enemy_players,'damage')}** | HS: **{_s(enemy_players,'headshots')}**",
+        value=f"K: **{_s(enemy_players,'kills')}** | DMG: **{_s(enemy_players,'damage')}**",
         inline=False,
     )
     if our_players:
@@ -4558,9 +4682,9 @@ async def vzp_monitor_loop():
                 continue
             vzp_last_check[guild_id] = now
 
-            family_id = cfg.get("familyId")
+            family_name = cfg.get("familyName")
             server_id = cfg.get("serverId")
-            if not family_id or not server_id:
+            if not family_name or not server_id:
                 continue
 
             processed = vzp_processed_events.setdefault(guild_id, {})
@@ -4572,12 +4696,10 @@ async def vzp_monitor_loop():
                 events = []
 
             for ev in events:
-                eid = str(ev.get("id") or ev.get("eventId") or "")
+                eid = str(ev.get("eventId") or ev.get("id") or "")
                 if not eid:
                     continue
-                atk  = ev.get("attackerOrganization") or {}
-                def_ = ev.get("defenderOrganization") or {}
-                if atk.get("id") != family_id and def_.get("id") != family_id:
+                if ev.get("attackerName") != family_name and ev.get("defenderName") != family_name:
                     continue
 
                 ended  = ev.get("endedAt")
@@ -4873,18 +4995,16 @@ async def vzp_history_cmd(interaction: discord.Interaction, количество
         color=0x5865F2,
         timestamp=datetime.now(),
     )
-    family_id = cfg["familyId"]
     for ev in items[:количество]:
-        atk    = (ev.get("attackerOrganization") or {}).get("name", "?")
-        def_   = (ev.get("defenderOrganization") or {}).get("name", "?")
-        winner = (ev.get("winnerOrganization")   or {}).get("id")
-        result = "✅ Победа" if winner == family_id else "❌ Поражение"
-        point  = ev.get("pointName", "?")
-        ts     = ev.get("endedAt") or ev.get("startedAt")
-        time_s = f"<t:{int(ts)}:d>" if ts else "—"
+        result   = "✅ Победа" if ev.get("isWin") else "❌ Поражение"
+        role     = ev.get("role", "?")
+        opponent = ev.get("opponentName", "?")
+        map_s    = ev.get("map", "?")
+        ts       = _vzp_ts(ev.get("date"))
+        time_s   = f"<t:{ts}:d>" if ts else "—"
         embed.add_field(
-            name=f"{result} — {point}",
-            value=f"{atk} ⚔️ {def_}\n{time_s}",
+            name=f"{result} — {map_s}",
+            value=f"{role} vs {opponent}\n{time_s}",
             inline=False,
         )
     if not items:

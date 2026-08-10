@@ -163,6 +163,9 @@ guild_shop_items: dict = {}
 # 🔑 РОЛЬ АДМИНИСТРАТОРА { guild_id: role_id }
 admin_roles: dict = {}
 
+# 🔑 ДОПОЛНИТЕЛЬНЫЕ РОЛИ АДМИНИСТРАТОРА { guild_id: [role_id, ...] }
+extra_admin_roles: dict = {}
+
 # 📄 КОНТРАКТЫ
 # { guild_id: { "channel_id": int, "message_id": int, "text": str, "image_url": str|None } }
 contract_settings: dict = {}
@@ -252,15 +255,17 @@ def is_admin(interaction: discord.Interaction) -> bool:
     if not isinstance(member, discord.Member):
         return False
     admin_role_id = admin_roles.get(interaction.guild_id)
-    if admin_role_id:
-        return any(role.id == admin_role_id for role in member.roles)
+    extra_ids = extra_admin_roles.get(interaction.guild_id, [])
+    if admin_role_id or extra_ids:
+        return any(role.id == admin_role_id or role.id in extra_ids for role in member.roles)
     return member.guild_permissions.administrator
 
 def is_admin_ctx(ctx) -> bool:
     """Для prefix-команд. Если роль не настроена — требует Discord-администратора."""
     admin_role_id = admin_roles.get(ctx.guild.id)
-    if admin_role_id:
-        return any(r.id == admin_role_id for r in ctx.author.roles)
+    extra_ids = extra_admin_roles.get(ctx.guild.id, [])
+    if admin_role_id or extra_ids:
+        return any(r.id == admin_role_id or r.id in extra_ids for r in ctx.author.roles)
     return ctx.author.guild_permissions.administrator
 
 def can_run_event(ctx, event_type: str) -> bool:
@@ -269,6 +274,19 @@ def can_run_event(ctx, event_type: str) -> bool:
         return True
     allowed = event_command_roles.get(ctx.guild.id, {}).get(event_type, [])
     return any(r.id in allowed for r in ctx.author.roles)
+
+def can_manage_event_message(interaction: discord.Interaction, data: dict) -> bool:
+    """Проверка доступа к управлению уже созданным сбором (например удаление фото)."""
+    if is_admin(interaction):
+        return True
+    event_type = data.get("cmd")
+    if not event_type:
+        return False
+    allowed = event_command_roles.get(interaction.guild_id, {}).get(event_type, [])
+    member = interaction.user
+    if not isinstance(member, discord.Member):
+        return False
+    return any(r.id in allowed for r in member.roles)
 
 def is_ticket_manager(interaction: discord.Interaction) -> bool:
     member = interaction.user
@@ -811,6 +829,7 @@ def save_data():
         "list_roles2":          {str(g): v for g, v in list_roles2.items()},
         "warn_roles":           {str(g): {str(k): v for k, v in wr.items()} for g, wr in warn_roles.items()},
         "admin_roles":          {str(g): v for g, v in admin_roles.items()},
+        "extra_admin_roles":    {str(g): v for g, v in extra_admin_roles.items()},
         "ticket_viewer_roles":  {str(g): v for g, v in ticket_viewer_roles.items()},
         "ticket_ping_role":     {str(g): v for g, v in ticket_ping_role.items()},
         "guild_shop_items":     {str(g): v for g, v in guild_shop_items.items()},
@@ -946,6 +965,8 @@ def load_data():
             warn_roles[int(g)] = {int(k): v for k, v in wr.items()}
         for g, v in data.get("admin_roles", {}).items():
             admin_roles[int(g)] = v
+        for g, v in data.get("extra_admin_roles", {}).items():
+            extra_admin_roles[int(g)] = v
         for g, v in data.get("ticket_viewer_roles", {}).items():
             ticket_viewer_roles[int(g)] = v
         for g, v in data.get("ticket_ping_role", {}).items():
@@ -1194,6 +1215,40 @@ class ReserveButton(ui.Button):
         await interaction.followup.send(msg_text, ephemeral=True)
 
 
+class DeleteImageButton(ui.Button):
+    """Кнопка-корзина: удаляет прикреплённое к сбору фото из эмбеда."""
+    def __init__(self, message_id: int):
+        super().__init__(
+            emoji="🗑️",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"delimg_{message_id}",
+            row=4,
+        )
+        self.message_id = message_id
+
+    async def callback(self, interaction: discord.Interaction):
+        data = event_lists.get(self.message_id)
+        if not data:
+            return await interaction.response.send_message("❌ Сбор уже недоступен!", ephemeral=True)
+        if not data.get("image_url"):
+            return await interaction.response.send_message("❌ Фото уже удалено.", ephemeral=True)
+        if not can_manage_event_message(interaction, data):
+            return await interaction.response.send_message("❌ Недостаточно прав для удаления фото!", ephemeral=True)
+
+        data["image_url"] = None
+        save_data()
+
+        join_mode = data.get("mode") == "join"
+        embed = build_event_embed(
+            interaction.guild_id, data["title"], data["max"], data["slots"],
+            None, data.get("note"), join_mode=join_mode,
+            event_time=data.get("event_time"), closed=data.get("closed", False),
+            reserve=data.get("reserve", []),
+        )
+        view = JoinEventView(self.message_id) if join_mode else EventView(self.message_id)
+        await interaction.response.edit_message(embed=embed, view=view, attachments=[])
+
+
 class EventView(ui.View):
     def __init__(self, message_id: int):
         super().__init__(timeout=None)
@@ -1203,12 +1258,16 @@ class EventView(ui.View):
             return
         slots     = data.get("slots", {})
         max_count = data.get("max", 0)
+        has_image = bool(data.get("image_url"))
 
-        # Макс. 24 слота-кнопки + 1 «Резерв» (лимит Discord — 25)
-        slot_count = min(max_count, 24)
+        # Макс. 24 слота-кнопки + 1 «Резерв» (лимит Discord — 25).
+        # Если есть фото — оставляем ещё одно место под кнопку-корзину.
+        slot_count = min(max_count, 23 if has_image else 24)
         for i in range(1, slot_count + 1):
             self.add_item(SlotButton(i, message_id, slots.get(i)))
         self.add_item(ReserveButton(message_id))
+        if has_image:
+            self.add_item(DeleteImageButton(message_id))
 
 
 class JoinButton(ui.Button):
@@ -1284,6 +1343,9 @@ class JoinEventView(ui.View):
         self.message_id = message_id
         self.add_item(JoinButton(message_id))
         self.add_item(ReserveButton(message_id))
+        data = event_lists.get(message_id)
+        if data and data.get("image_url"):
+            self.add_item(DeleteImageButton(message_id))
 
 
 # ─────────────────────────────────────────────
@@ -2130,7 +2192,7 @@ async def set_event_role(ctx, роль: discord.Role):
     await ctx.message.delete()
 
 
-async def _create_event_message(channel, guild, title: str, max_count: int, image_file=None, image_ref: str | None = None, content: str | None = None, force_join_mode: bool = False, event_time: str = None):
+async def _create_event_message(channel, guild, title: str, max_count: int, image_file=None, image_ref: str | None = None, content: str | None = None, force_join_mode: bool = False, event_time: str = None, cmd: str | None = None):
     """Создаёт сбор: эмбед + тред. <= 24 слотов → кнопки-цифры, > 24 → одна кнопка ✅."""
     if not (1 <= max_count <= 100):
         await channel.send("❌ Количество слотов: от 1 до 100!", delete_after=5)
@@ -2155,7 +2217,7 @@ async def _create_event_message(channel, guild, title: str, max_count: int, imag
         "title": title, "max": max_count, "mode": "join" if join_mode else "buttons",
         "slots": slots, "reserve": [], "image_url": image_ref, "note": None,
         "channel_id": channel.id, "thread_id": None, "thread_msg_id": None,
-        "event_time": event_time, "closed": False,
+        "event_time": event_time, "closed": False, "cmd": cmd,
     }
 
     view = JoinEventView(msg.id) if join_mode else EventView(msg.id)
@@ -2234,7 +2296,7 @@ async def взп_cmd(ctx, количество: int = 10, *, название: s
         event_time = m.group(1)
         название = m.group(2).strip() or "ВЗП"
 
-    await _create_event_message(ctx.channel, ctx.guild, название, количество, image_file, image_ref, content=content, event_time=event_time)
+    await _create_event_message(ctx.channel, ctx.guild, название, количество, image_file, image_ref, content=content, event_time=event_time, cmd="vzp")
 
 
 @bot.command(name="mp")
@@ -2280,7 +2342,7 @@ async def мп_cmd(ctx, количество: int = 10, *, название: str
         event_time = m.group(1)
         название = m.group(2).strip() or "МП"
 
-    await _create_event_message(ctx.channel, ctx.guild, название, количество, image_file, image_ref, content=content, event_time=event_time)
+    await _create_event_message(ctx.channel, ctx.guild, название, количество, image_file, image_ref, content=content, event_time=event_time, cmd="mp")
 
 
 @bot.command(name="роль_взп")
@@ -2461,7 +2523,48 @@ async def реаки_cmd(ctx, количество: int = 10, *, названи�
         event_time = m.group(1)
         название = m.group(2).strip() or "Реакции"
 
-    await _create_event_message(ctx.channel, ctx.guild, название, количество, image_file, image_ref, content=content, force_join_mode=True, event_time=event_time)
+    await _create_event_message(ctx.channel, ctx.guild, название, количество, image_file, image_ref, content=content, force_join_mode=True, event_time=event_time, cmd="list")
+
+
+@bot.command(name="spisok")
+async def spisok_cmd(ctx):
+    """!spisok — ответом (reply) на своё сообщение собирает список тех, кто поставил реакцию"""
+    if not can_run_event(ctx, "list"):
+        return await ctx.message.delete()
+
+    ref = ctx.message.reference
+    if not ref or not ref.message_id:
+        return await ctx.send("❌ Используй эту команду **ответом** (reply) на сообщение с реакциями!", delete_after=8)
+
+    try:
+        target = ref.cached_message or await ctx.channel.fetch_message(ref.message_id)
+    except Exception:
+        return await ctx.send("❌ Не удалось найти исходное сообщение.", delete_after=8)
+
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
+
+    users = set()
+    for reaction in target.reactions:
+        async for user in reaction.users():
+            if not user.bot:
+                users.add(user.id)
+
+    if not users:
+        return await ctx.send("❌ На это сообщение ещё никто не отреагировал.", delete_after=8)
+
+    sorted_ids = sorted(users)
+    lines = [f"`{str(i).zfill(2)}.` <@{uid}>" for i, uid in enumerate(sorted_ids, 1)]
+    embed = discord.Embed(
+        title="📋 Список отреагировавших",
+        description="\n".join(lines) + f"\n\n**Всего: {len(sorted_ids)}**",
+        color=discord.Color.blurple(),
+        timestamp=datetime.now(),
+    )
+    embed.set_footer(text="DIAMOND", icon_url=_footer(ctx.guild.id))
+    await ctx.send(embed=embed)
 
 
 # ─────────────────────────────────────────────
@@ -2495,7 +2598,7 @@ async def slash_vzp(interaction: discord.Interaction, количество: int 
         if r:
             mentions.append(r.mention)
     content = " ".join(mentions) if mentions else None
-    await _create_event_message(interaction.channel, interaction.guild, название, количество, content=content, event_time=время)
+    await _create_event_message(interaction.channel, interaction.guild, название, количество, content=content, event_time=время, cmd="vzp")
     await interaction.followup.send("✅ Сбор ВЗП создан!", ephemeral=True)
 
 
@@ -2521,7 +2624,7 @@ async def slash_mp(interaction: discord.Interaction, количество: int =
         if r:
             mentions.append(r.mention)
     content = " ".join(mentions) if mentions else None
-    await _create_event_message(interaction.channel, interaction.guild, название, количество, content=content, event_time=время)
+    await _create_event_message(interaction.channel, interaction.guild, название, количество, content=content, event_time=время, cmd="mp")
     await interaction.followup.send("✅ Сбор МП создан!", ephemeral=True)
 
 
@@ -2547,7 +2650,7 @@ async def slash_reaki(interaction: discord.Interaction, количество: in
         if r:
             mentions.append(r.mention)
     content = " ".join(mentions) if mentions else None
-    await _create_event_message(interaction.channel, interaction.guild, название, количество, content=content, force_join_mode=True, event_time=время)
+    await _create_event_message(interaction.channel, interaction.guild, название, количество, content=content, force_join_mode=True, event_time=время, cmd="list")
     await interaction.followup.send("✅ Сбор реакций создан!", ephemeral=True)
 
 
@@ -3273,6 +3376,48 @@ async def set_admin_role(ctx, роль: discord.Role):
     await ctx.message.delete()
 
 
+@bot.command(name="роль_админ_добавить")
+async def add_extra_admin_role(ctx, роль: discord.Role):
+    """!роль_админ_добавить @роль — добавить ещё одну роль, которая может управлять ботом наравне с основной"""
+    if not ctx.author.guild_permissions.administrator:
+        return await ctx.message.delete()
+    roles = extra_admin_roles.setdefault(ctx.guild.id, [])
+    if роль.id in roles or роль.id == admin_roles.get(ctx.guild.id):
+        embed = discord.Embed(description=f"⚠️ {роль.mention} уже управляет ботом.", color=discord.Color.orange())
+    else:
+        roles.append(роль.id)
+        save_data()
+        embed = discord.Embed(
+            title="✅ Роль добавлена",
+            description=f"{роль.mention} теперь тоже может управлять ботом наравне с основной админ-ролью.",
+            color=discord.Color.green(),
+        )
+    embed.set_footer(text="DIAMOND", icon_url=_footer(ctx.guild.id))
+    await ctx.send(embed=embed, delete_after=15)
+    await ctx.message.delete()
+
+
+@bot.command(name="роль_админ_убрать")
+async def remove_extra_admin_role(ctx, роль: discord.Role):
+    """!роль_админ_убрать @роль — убрать роль из списка дополнительных админ-ролей"""
+    if not ctx.author.guild_permissions.administrator:
+        return await ctx.message.delete()
+    roles = extra_admin_roles.get(ctx.guild.id, [])
+    if роль.id not in roles:
+        embed = discord.Embed(description=f"⚠️ {роль.mention} и так не в списке дополнительных админ-ролей.", color=discord.Color.orange())
+    else:
+        roles.remove(роль.id)
+        save_data()
+        embed = discord.Embed(
+            title="✅ Роль убрана",
+            description=f"{роль.mention} больше не управляет ботом.",
+            color=discord.Color.green(),
+        )
+    embed.set_footer(text="DIAMOND", icon_url=_footer(ctx.guild.id))
+    await ctx.send(embed=embed, delete_after=15)
+    await ctx.message.delete()
+
+
 @tree.command(name="настройки", description="Показать текущую конфигурацию бота на этом сервере")
 async def slash_settings(interaction: discord.Interaction):
     if not is_admin(interaction):
@@ -3295,6 +3440,8 @@ async def slash_settings(interaction: discord.Interaction):
     gid = g.id
     wr  = warn_roles.get(gid, {})
     tp  = ticket_panels.get(gid, {})
+    extra_admins = extra_admin_roles.get(gid, [])
+    extra_admins_str = ", ".join(f"<@&{rid}>" for rid in extra_admins) if extra_admins else "*нет*"
 
     embed = discord.Embed(
         title="⚙️ Конфигурация бота",
@@ -3305,6 +3452,7 @@ async def slash_settings(interaction: discord.Interaction):
         name="🔑 Роли",
         value=(
             f"Администратор: {role_str(admin_roles.get(gid))}\n"
+            f"Доп. админ-роли: {extra_admins_str}\n"
             f"Тикет-менеджер: {role_str(ticket_manager_roles.get(gid))}\n"
             f"Роль ВЗП: {role_str(vzp_roles.get(gid))}\n"
             f"Роль МП: {role_str(mp_roles.get(gid))}\n"

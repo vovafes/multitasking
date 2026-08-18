@@ -6955,13 +6955,25 @@ async def slash_obshak_all(interaction: discord.Interaction):
 @tasks.loop(minutes=1)
 async def afk_expire_loop():
     """Каждую минуту проверяет AFK-список и удаляет тех, чьё время вернуться наступило (МСК)."""
+    import re as _re
     now_msk_dt = now_msk()
-    now_date_time = now_msk_dt.strftime("%d.%m %H:%M")  # формат как в return_time: "25.05 18:30"
     for guild_id, users in list(afk_list.items()):
-        expired = [
-            uid for uid, data in users.items()
-            if data.get("return_time", "").strip() == now_date_time
-        ]
+        expired = []
+        for uid, data in users.items():
+            m = _re.match(r"^(\d{2})\.(\d{2})\s+(\d{2}):(\d{2})$", data.get("return_time", "").strip())
+            if not m:
+                continue
+            day, mon, hour, minute = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+            since = data.get("since")
+            year = since.year if isinstance(since, datetime) else now_msk_dt.year
+            try:
+                target = datetime(year, mon, day, hour, minute)
+            except ValueError:
+                continue
+            if isinstance(since, datetime) and target < since:
+                target = target.replace(year=year + 1)
+            if now_msk_dt >= target:
+                expired.append(uid)
         if not expired:
             continue
         for uid in expired:

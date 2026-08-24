@@ -340,7 +340,6 @@ def build_event_embed(
     slots: dict,
     image_url: str = None,
     note: str = None,
-    join_mode: bool = False,
     event_time: str = None,
     closed: bool = False,
     reserve: list | None = None,
@@ -364,10 +363,7 @@ def build_event_embed(
         prefix += "🔒 **СПИСОК ЗАКРЫТ**\n"
     if prefix:
         prefix += "\n"
-    if join_mode:
-        description = f"{prefix}Нажми ✅ чтобы записаться · 🪑 резерв если места заняты\n\n**Участники ({filled}/{max_count}):**\n{text}"
-    else:
-        description = f"{prefix}Нажми кнопку слота · 🪑 **Резерв** — запасной список\n\n**Слоты ({filled}/{max_count}):**\n{text}"
+    description = f"{prefix}Нажми кнопку слота · 🪑 **Резерв** — запасной список\n\n**Слоты ({filled}/{max_count}):**\n{text}"
     description += _format_reserve_block(reserve)
     if note:
         description += f"\n\n📌 **Заметка:** {note}"
@@ -446,14 +442,13 @@ class KickModal(ui.Modal, title="Кикнуть из списка"):
         try:
             channel = bot.get_channel(data["channel_id"])
             orig_msg = await channel.fetch_message(self.message_id)
-            join_mode = data.get("mode") == "join"
             embed = build_event_embed(
                 interaction.guild_id, data["title"], data["max"], slots,
-                data.get("image_url"), data.get("note"), join_mode=join_mode,
+                data.get("image_url"), data.get("note"),
                 event_time=data.get("event_time"), closed=data.get("closed", False),
                 reserve=reserve,
             )
-            view = JoinEventView(self.message_id) if join_mode else EventView(self.message_id)
+            view = PaginatedEventView(self.message_id)
             await orig_msg.edit(embed=embed, view=view)
         except Exception:
             pass
@@ -503,14 +498,13 @@ class CloseListButton(ui.Button):
         try:
             channel = bot.get_channel(data["channel_id"])
             orig_msg = await channel.fetch_message(self.message_id)
-            join_mode = data.get("mode") == "join"
             embed = build_event_embed(
                 interaction.guild_id, data["title"], data["max"], data["slots"],
-                data.get("image_url"), data.get("note"), join_mode=join_mode,
+                data.get("image_url"), data.get("note"),
                 event_time=data.get("event_time"), closed=data["closed"],
                 reserve=data.get("reserve", []),
             )
-            view = JoinEventView(self.message_id) if join_mode else EventView(self.message_id)
+            view = PaginatedEventView(self.message_id)
             await orig_msg.edit(embed=embed, view=view)
         except Exception:
             pass
@@ -570,14 +564,13 @@ class PromoteFromReserveModal(ui.Modal, title="Убрать с резерва в
         try:
             channel = bot.get_channel(data["channel_id"])
             orig_msg = await channel.fetch_message(self.message_id)
-            join_mode = data.get("mode") == "join"
             embed = build_event_embed(
                 interaction.guild_id, data["title"], data["max"], slots,
-                data.get("image_url"), data.get("note"), join_mode=join_mode,
+                data.get("image_url"), data.get("note"),
                 event_time=data.get("event_time"), closed=data.get("closed", False),
                 reserve=reserve,
             )
-            view = JoinEventView(self.message_id) if join_mode else EventView(self.message_id)
+            view = PaginatedEventView(self.message_id)
             await orig_msg.edit(embed=embed, view=view)
         except Exception:
             pass
@@ -1113,11 +1106,12 @@ async def refresh_inactive_message(guild: discord.Guild):
 # СБОР — СЛОТЫ
 # ─────────────────────────────────────────────
 class SlotButton(ui.Button):
-    def __init__(self, slot_num: int, message_id: int, taken_by: int | None):
+    def __init__(self, slot_num: int, message_id: int, taken_by: int | None, row: int | None = None):
         super().__init__(
             label=str(slot_num),
             style=discord.ButtonStyle.danger if taken_by else discord.ButtonStyle.success,
             custom_id=f"slot_{message_id}_{slot_num}",
+            row=row,
         )
         self.slot_num = slot_num
         self.message_id = message_id
@@ -1154,7 +1148,7 @@ class SlotButton(ui.Button):
             msg_text = f"✅ Вы заняли слот **{self.slot_num}**!"
 
         save_data()
-        new_view = EventView(self.message_id)
+        new_view = PaginatedEventView(self.message_id)
         embed    = build_event_embed(
             interaction.guild_id, data["title"], data["max"], slots,
             data.get("image_url"), data.get("note"),
@@ -1175,6 +1169,7 @@ class ReserveButton(ui.Button):
             emoji="🪑",
             style=discord.ButtonStyle.secondary,
             custom_id=f"reserve_{message_id}",
+            row=2,
         )
         self.message_id = message_id
 
@@ -1188,7 +1183,6 @@ class ReserveButton(ui.Button):
         user_id = interaction.user.id
         slots = data["slots"]
         reserve = data.setdefault("reserve", [])
-        join_mode = data.get("mode") == "join"
 
         if user_id in reserve:
             reserve.remove(user_id)
@@ -1204,11 +1198,11 @@ class ReserveButton(ui.Button):
         save_data()
         embed = build_event_embed(
             interaction.guild_id, data["title"], data["max"], slots,
-            data.get("image_url"), data.get("note"), join_mode=join_mode,
+            data.get("image_url"), data.get("note"),
             event_time=data.get("event_time"), closed=data.get("closed", False),
             reserve=reserve,
         )
-        view = JoinEventView(self.message_id) if join_mode else EventView(self.message_id)
+        view = PaginatedEventView(self.message_id)
         await interaction.response.defer()
         await interaction.message.edit(embed=embed, view=view)
         await update_thread_list(self.message_id)
@@ -1238,18 +1232,73 @@ class DeleteImageButton(ui.Button):
         data["image_url"] = None
         save_data()
 
-        join_mode = data.get("mode") == "join"
         embed = build_event_embed(
             interaction.guild_id, data["title"], data["max"], data["slots"],
-            None, data.get("note"), join_mode=join_mode,
+            None, data.get("note"),
             event_time=data.get("event_time"), closed=data.get("closed", False),
             reserve=data.get("reserve", []),
         )
-        view = JoinEventView(self.message_id) if join_mode else EventView(self.message_id)
+        view = PaginatedEventView(self.message_id)
         await interaction.response.edit_message(embed=embed, view=view, attachments=[])
 
 
-class EventView(ui.View):
+class PrevPageButton(ui.Button):
+    def __init__(self, message_id: int, page: int):
+        super().__init__(
+            emoji="◀",
+            style=discord.ButtonStyle.blurple,
+            custom_id=f"prevpage_{message_id}",
+            disabled=(page <= 0),
+            row=2,
+        )
+        self.message_id = message_id
+
+    async def callback(self, interaction: discord.Interaction):
+        data = event_lists.get(self.message_id)
+        if not data:
+            return await interaction.response.send_message("❌ Сбор уже недоступен!", ephemeral=True)
+        data["page"] = max(0, data.get("page", 0) - 1)
+        save_data()
+        await interaction.response.edit_message(view=PaginatedEventView(self.message_id))
+
+
+class NextPageButton(ui.Button):
+    def __init__(self, message_id: int, page: int, total_pages: int):
+        super().__init__(
+            emoji="▶",
+            style=discord.ButtonStyle.blurple,
+            custom_id=f"nextpage_{message_id}",
+            disabled=(page >= total_pages - 1),
+            row=2,
+        )
+        self.message_id = message_id
+
+    async def callback(self, interaction: discord.Interaction):
+        data = event_lists.get(self.message_id)
+        if not data:
+            return await interaction.response.send_message("❌ Сбор уже недоступен!", ephemeral=True)
+        max_count = data.get("max", 0)
+        total_pages = max(1, (max_count + PaginatedEventView.PAGE_SIZE - 1) // PaginatedEventView.PAGE_SIZE)
+        data["page"] = min(total_pages - 1, data.get("page", 0) + 1)
+        save_data()
+        await interaction.response.edit_message(view=PaginatedEventView(self.message_id))
+
+
+class PageIndicatorButton(ui.Button):
+    """Неактивная кнопка-индикатор текущей страницы."""
+    def __init__(self, page: int, total_pages: int):
+        super().__init__(
+            label=f"{page + 1}/{total_pages}",
+            style=discord.ButtonStyle.secondary,
+            disabled=True,
+            row=2,
+        )
+
+
+class PaginatedEventView(ui.View):
+    """Кнопки-слоты постранично (по PAGE_SIZE шт.), с навигацией ◀ ▶."""
+    PAGE_SIZE = 10
+
     def __init__(self, message_id: int):
         super().__init__(timeout=None)
         self.message_id = message_id
@@ -1260,91 +1309,22 @@ class EventView(ui.View):
         max_count = data.get("max", 0)
         has_image = bool(data.get("image_url"))
 
-        # Макс. 24 слота-кнопки + 1 «Резерв» (лимит Discord — 25).
-        # Если есть фото — оставляем ещё одно место под кнопку-корзину.
-        slot_count = min(max_count, 23 if has_image else 24)
-        for i in range(1, slot_count + 1):
-            self.add_item(SlotButton(i, message_id, slots.get(i)))
+        total_pages = max(1, (max_count + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        page = max(0, min(data.get("page", 0), total_pages - 1))
+        data["page"] = page
+
+        start = page * self.PAGE_SIZE + 1
+        end   = min(max_count, start + self.PAGE_SIZE - 1)
+        for i in range(start, end + 1):
+            local_i = i - start
+            self.add_item(SlotButton(i, message_id, slots.get(i), row=local_i // 5))
+
+        if total_pages > 1:
+            self.add_item(PrevPageButton(message_id, page))
+            self.add_item(PageIndicatorButton(page, total_pages))
+            self.add_item(NextPageButton(message_id, page, total_pages))
         self.add_item(ReserveButton(message_id))
         if has_image:
-            self.add_item(DeleteImageButton(message_id))
-
-
-class JoinButton(ui.Button):
-    """Одна кнопка ✅ для записи/выхода — используется когда слотов > 24."""
-    def __init__(self, message_id: int):
-        super().__init__(
-            label="Записаться",
-            emoji="✅",
-            style=discord.ButtonStyle.success,
-            custom_id=f"join_{message_id}",
-        )
-        self.message_id = message_id
-
-    async def callback(self, interaction: discord.Interaction):
-        data = event_lists.get(self.message_id)
-        if not data:
-            return await interaction.response.send_message("❌ Сбор недоступен!", ephemeral=True)
-
-        if data.get("closed"):
-            return await interaction.response.send_message("🔒 Список закрыт!", ephemeral=True)
-
-        user_id = interaction.user.id
-        slots   = data["slots"]
-        reserve = data.setdefault("reserve", [])
-
-        # Уже записан — выйти
-        for slot_num, uid in slots.items():
-            if uid == user_id:
-                slots[slot_num] = None
-                save_data()
-                embed = build_event_embed(
-                    interaction.guild_id, data["title"], data["max"], slots,
-                    data.get("image_url"), data.get("note"), join_mode=True,
-                    event_time=data.get("event_time"), closed=data.get("closed", False),
-                    reserve=reserve,
-                )
-                view = JoinEventView(self.message_id)
-                await interaction.response.defer()
-                await interaction.message.edit(embed=embed, view=view)
-                await update_thread_list(self.message_id)
-                await interaction.followup.send("❌ Вы покинули сбор", ephemeral=True)
-                return
-
-        # Найти свободный слот
-        for i in range(1, data["max"] + 1):
-            if slots.get(i) is None:
-                if user_id in reserve:
-                    reserve.remove(user_id)
-                slots[i] = user_id
-                save_data()
-                embed = build_event_embed(
-                    interaction.guild_id, data["title"], data["max"], slots,
-                    data.get("image_url"), data.get("note"), join_mode=True,
-                    event_time=data.get("event_time"), closed=data.get("closed", False),
-                    reserve=reserve,
-                )
-                view = JoinEventView(self.message_id)
-                await interaction.response.defer()
-                await interaction.message.edit(embed=embed, view=view)
-                await update_thread_list(self.message_id)
-                await interaction.followup.send("✅ Вы записались в сбор!", ephemeral=True)
-                return
-
-        await interaction.response.send_message(
-            "❌ Все места заняты! Запишись в **🪑 Резерв**.", ephemeral=True
-        )
-
-
-class JoinEventView(ui.View):
-    """View с кнопкой ✅ и резервом. Для сборов с > 24 слотами / !list."""
-    def __init__(self, message_id: int):
-        super().__init__(timeout=None)
-        self.message_id = message_id
-        self.add_item(JoinButton(message_id))
-        self.add_item(ReserveButton(message_id))
-        data = event_lists.get(message_id)
-        if data and data.get("image_url"):
             self.add_item(DeleteImageButton(message_id))
 
 
@@ -2192,16 +2172,15 @@ async def set_event_role(ctx, роль: discord.Role):
     await ctx.message.delete()
 
 
-async def _create_event_message(channel, guild, title: str, max_count: int, image_file=None, image_ref: str | None = None, content: str | None = None, force_join_mode: bool = False, event_time: str = None, cmd: str | None = None):
-    """Создаёт сбор: эмбед + тред. <= 24 слотов → кнопки-цифры, > 24 → одна кнопка ✅."""
+async def _create_event_message(channel, guild, title: str, max_count: int, image_file=None, image_ref: str | None = None, content: str | None = None, event_time: str = None, cmd: str | None = None):
+    """Создаёт сбор: эмбед + тред. Кнопки-слоты идут постранично по 10 шт."""
     if not (1 <= max_count <= 100):
         await channel.send("❌ Количество слотов: от 1 до 100!", delete_after=5)
         return
 
-    join_mode = force_join_mode or max_count > 24
-    slots     = {i: None for i in range(1, max_count + 1)}
+    slots = {i: None for i in range(1, max_count + 1)}
 
-    embed = build_event_embed(guild.id, title, max_count, slots, image_ref, join_mode=join_mode, event_time=event_time)
+    embed = build_event_embed(guild.id, title, max_count, slots, image_ref, event_time=event_time)
 
     if image_file:
         msg = await channel.send(content=content, embed=embed, file=image_file)
@@ -2214,18 +2193,18 @@ async def _create_event_message(channel, guild, title: str, max_count: int, imag
         embed.set_image(url=image_ref)
 
     event_lists[msg.id] = {
-        "title": title, "max": max_count, "mode": "join" if join_mode else "buttons",
+        "title": title, "max": max_count, "page": 0,
         "slots": slots, "reserve": [], "image_url": image_ref, "note": None,
         "channel_id": channel.id, "thread_id": None, "thread_msg_id": None,
         "event_time": event_time, "closed": False, "cmd": cmd,
     }
 
-    view = JoinEventView(msg.id) if join_mode else EventView(msg.id)
+    view = PaginatedEventView(msg.id)
     await msg.edit(embed=embed, view=view)
 
     # Тред с живым списком
     try:
-        hint = "Нажми ✅ для записи · 🪑 Резерв — запасной список" if join_mode else "Кнопка слота · 🪑 Резерв — запасной список"
+        hint = "Кнопка слота · 🪑 Резерв — запасной список"
         thread = await msg.create_thread(name=f"💬 {title}", auto_archive_duration=1440)
         thread_embed = discord.Embed(
             description=f"📋 Обсуждение сбора **{title}**\n{hint}",
@@ -2523,7 +2502,7 @@ async def реаки_cmd(ctx, количество: int = 10, *, названи�
         event_time = m.group(1)
         название = m.group(2).strip() or "Реакции"
 
-    await _create_event_message(ctx.channel, ctx.guild, название, количество, image_file, image_ref, content=content, force_join_mode=True, event_time=event_time, cmd="list")
+    await _create_event_message(ctx.channel, ctx.guild, название, количество, image_file, image_ref, content=content, event_time=event_time, cmd="list")
 
 
 @bot.command(name="spisok")
@@ -2644,7 +2623,7 @@ async def slash_reaki(interaction: discord.Interaction, количество: in
         if r:
             mentions.append(r.mention)
     content = " ".join(mentions) if mentions else None
-    await _create_event_message(interaction.channel, interaction.guild, название, количество, content=content, force_join_mode=True, event_time=время, cmd="list")
+    await _create_event_message(interaction.channel, interaction.guild, название, количество, content=content, event_time=время, cmd="list")
     await interaction.followup.send("✅ Сбор реакций создан!", ephemeral=True)
 
 
@@ -3327,14 +3306,13 @@ async def замена_cmd(ctx, кого: int, на_кого: int = 0):
     try:
         channel = bot.get_channel(data["channel_id"])
         msg = await channel.fetch_message(msg_id)
-        join_mode = data.get("mode") == "join"
         embed = build_event_embed(
             ctx.guild.id, data["title"], data["max"], slots,
-            data.get("image_url"), data.get("note"), join_mode=join_mode,
+            data.get("image_url"), data.get("note"),
             event_time=data.get("event_time"), closed=data.get("closed", False),
             reserve=data.get("reserve", []),
         )
-        view = JoinEventView(msg_id) if join_mode else EventView(msg_id)
+        view = PaginatedEventView(msg_id)
         await msg.edit(embed=embed, view=view)
     except Exception:
         pass
@@ -4829,10 +4807,7 @@ async def on_ready():
             bot.add_view(TicketPanelView(cat_id))
     for message_id, ev in event_lists.items():
         bot.add_view(ThreadListView(message_id))
-        if ev.get("mode") == "join":
-            bot.add_view(JoinEventView(message_id))
-        else:
-            bot.add_view(EventView(message_id))
+        bot.add_view(PaginatedEventView(message_id))
     await tree.sync()
     print(f"Bot online: {bot.user} (ID: {bot.user.id})")
     await bot.change_presence(activity=discord.Activity(

@@ -50,7 +50,7 @@ DEFAULT_TICKET_DESC  = (
     "Для тех кто играет **РП**:\n"
     "Откаты с поставок/взх и откат любого ДМ не позднее месячной давности."
 )
-DEFAULT_TICKET_IMAGE = "https://i.imgur.com/umswh4i.gif"
+DEFAULT_TICKET_IMAGE = "https://i.imgur.com/71VIhBL.png"
 
 # ─────────────────────────────────────────────
 # ХРАНИЛИЩЕ

@@ -343,6 +343,7 @@ def build_event_embed(
     event_time: str = None,
     closed: bool = False,
     reserve: list | None = None,
+    join_mode: bool = False,
 ) -> discord.Embed:
     filled = sum(1 for v in slots.values() if v is not None)
     if closed:
@@ -363,7 +364,10 @@ def build_event_embed(
         prefix += "🔒 **СПИСОК ЗАКРЫТ**\n"
     if prefix:
         prefix += "\n"
-    description = f"{prefix}Нажми кнопку слота · 🪑 **Резерв** — запасной список\n\n**Слоты ({filled}/{max_count}):**\n{text}"
+    if join_mode:
+        description = f"{prefix}Нажми ✅ **Записаться** · 🪑 **Резерв** — запасной список\n\n**Участники ({filled}/{max_count}):**\n{text}"
+    else:
+        description = f"{prefix}Нажми кнопку слота · 🪑 **Резерв** — запасной список\n\n**Слоты ({filled}/{max_count}):**\n{text}"
     description += _format_reserve_block(reserve)
     if note:
         description += f"\n\n📌 **Заметка:** {note}"
@@ -447,8 +451,9 @@ class KickModal(ui.Modal, title="Кикнуть из списка"):
                 data.get("image_url"), data.get("note"),
                 event_time=data.get("event_time"), closed=data.get("closed", False),
                 reserve=reserve,
+                join_mode=data.get("cmd") == "list",
             )
-            view = PaginatedEventView(self.message_id)
+            view = event_view(self.message_id)
             await orig_msg.edit(embed=embed, view=view)
         except Exception:
             pass
@@ -503,8 +508,9 @@ class CloseListButton(ui.Button):
                 data.get("image_url"), data.get("note"),
                 event_time=data.get("event_time"), closed=data["closed"],
                 reserve=data.get("reserve", []),
+                join_mode=data.get("cmd") == "list",
             )
-            view = PaginatedEventView(self.message_id)
+            view = event_view(self.message_id)
             await orig_msg.edit(embed=embed, view=view)
         except Exception:
             pass
@@ -569,8 +575,9 @@ class PromoteFromReserveModal(ui.Modal, title="Убрать с резерва в
                 data.get("image_url"), data.get("note"),
                 event_time=data.get("event_time"), closed=data.get("closed", False),
                 reserve=reserve,
+                join_mode=data.get("cmd") == "list",
             )
-            view = PaginatedEventView(self.message_id)
+            view = event_view(self.message_id)
             await orig_msg.edit(embed=embed, view=view)
         except Exception:
             pass
@@ -1148,13 +1155,14 @@ class SlotButton(ui.Button):
             msg_text = f"✅ Вы заняли слот **{self.slot_num}**!"
 
         save_data()
-        new_view = PaginatedEventView(self.message_id)
+        new_view = event_view(self.message_id)
         embed    = build_event_embed(
             interaction.guild_id, data["title"], data["max"], slots,
             data.get("image_url"), data.get("note"),
             event_time=data.get("event_time"), closed=data.get("closed", False),
             reserve=reserve,
         )
+        join_mode=data.get("cmd") == "list",
         await interaction.response.defer()
         await interaction.message.edit(embed=embed, view=new_view)
         await update_thread_list(self.message_id)
@@ -1201,8 +1209,9 @@ class ReserveButton(ui.Button):
             data.get("image_url"), data.get("note"),
             event_time=data.get("event_time"), closed=data.get("closed", False),
             reserve=reserve,
+            join_mode=data.get("cmd") == "list",
         )
-        view = PaginatedEventView(self.message_id)
+        view = event_view(self.message_id)
         await interaction.response.defer()
         await interaction.message.edit(embed=embed, view=view)
         await update_thread_list(self.message_id)
@@ -1237,8 +1246,9 @@ class DeleteImageButton(ui.Button):
             None, data.get("note"),
             event_time=data.get("event_time"), closed=data.get("closed", False),
             reserve=data.get("reserve", []),
+            join_mode=data.get("cmd") == "list",
         )
-        view = PaginatedEventView(self.message_id)
+        view = event_view(self.message_id)
         await interaction.response.edit_message(embed=embed, view=view, attachments=[])
 
 
@@ -1326,6 +1336,89 @@ class PaginatedEventView(ui.View):
         self.add_item(ReserveButton(message_id))
         if has_image:
             self.add_item(DeleteImageButton(message_id))
+
+
+class JoinButton(ui.Button):
+    """Одна кнопка ✅ «Записаться» — используется для !list."""
+    def __init__(self, message_id: int):
+        super().__init__(
+            label="Записаться",
+            emoji="✅",
+            style=discord.ButtonStyle.success,
+            custom_id=f"join_{message_id}",
+        )
+        self.message_id = message_id
+
+    async def callback(self, interaction: discord.Interaction):
+        data = event_lists.get(self.message_id)
+        if not data:
+            return await interaction.response.send_message("❌ Сбор недоступен!", ephemeral=True)
+        if data.get("closed"):
+            return await interaction.response.send_message("🔒 Список закрыт!", ephemeral=True)
+
+        user_id = interaction.user.id
+        slots   = data["slots"]
+        reserve = data.setdefault("reserve", [])
+
+        for slot_num, uid in slots.items():
+            if uid == user_id:
+                slots[slot_num] = None
+                save_data()
+                embed = build_event_embed(
+                    interaction.guild_id, data["title"], data["max"], slots,
+                    data.get("image_url"), data.get("note"), join_mode=True,
+                    event_time=data.get("event_time"), closed=data.get("closed", False),
+                    reserve=reserve,
+                )
+                view = JoinEventView(self.message_id)
+                await interaction.response.defer()
+                await interaction.message.edit(embed=embed, view=view)
+                await update_thread_list(self.message_id)
+                await interaction.followup.send("❌ Вы покинули сбор", ephemeral=True)
+                return
+
+        for i in range(1, data["max"] + 1):
+            if slots.get(i) is None:
+                if user_id in reserve:
+                    reserve.remove(user_id)
+                slots[i] = user_id
+                save_data()
+                embed = build_event_embed(
+                    interaction.guild_id, data["title"], data["max"], slots,
+                    data.get("image_url"), data.get("note"), join_mode=True,
+                    event_time=data.get("event_time"), closed=data.get("closed", False),
+                    reserve=reserve,
+                )
+                view = JoinEventView(self.message_id)
+                await interaction.response.defer()
+                await interaction.message.edit(embed=embed, view=view)
+                await update_thread_list(self.message_id)
+                await interaction.followup.send("✅ Вы записались в сбор!", ephemeral=True)
+                return
+
+        await interaction.response.send_message(
+            "❌ Все места заняты! Запишись в **🪑 Резерв**.", ephemeral=True
+        )
+
+
+class JoinEventView(ui.View):
+    """View с кнопкой ✅ «Записаться» и резервом — используется для !list."""
+    def __init__(self, message_id: int):
+        super().__init__(timeout=None)
+        self.message_id = message_id
+        self.add_item(JoinButton(message_id))
+        self.add_item(ReserveButton(message_id))
+        data = event_lists.get(message_id)
+        if data and data.get("image_url"):
+            self.add_item(DeleteImageButton(message_id))
+
+
+def event_view(message_id: int) -> ui.View:
+    """Выбирает вид кнопок сбора: одна «Записаться» для !list, слоты — для остальных."""
+    data = event_lists.get(message_id)
+    if data and data.get("cmd") == "list":
+        return JoinEventView(message_id)
+    return PaginatedEventView(message_id)
 
 
 # ─────────────────────────────────────────────
@@ -2179,8 +2272,9 @@ async def _create_event_message(channel, guild, title: str, max_count: int, imag
         return
 
     slots = {i: None for i in range(1, max_count + 1)}
+    join_mode = (cmd == "list")
 
-    embed = build_event_embed(guild.id, title, max_count, slots, image_ref, event_time=event_time)
+    embed = build_event_embed(guild.id, title, max_count, slots, image_ref, event_time=event_time, join_mode=join_mode)
 
     if image_file:
         msg = await channel.send(content=content, embed=embed, file=image_file)
@@ -2199,12 +2293,12 @@ async def _create_event_message(channel, guild, title: str, max_count: int, imag
         "event_time": event_time, "closed": False, "cmd": cmd,
     }
 
-    view = PaginatedEventView(msg.id)
+    view = event_view(msg.id)
     await msg.edit(embed=embed, view=view)
 
     # Тред с живым списком
     try:
-        hint = "Кнопка слота · 🪑 Резерв — запасной список"
+        hint = "✅ Записаться · 🪑 Резерв — запасной список" if join_mode else "Кнопка слота · 🪑 Резерв — запасной список"
         thread = await msg.create_thread(name=f"💬 {title}", auto_archive_duration=1440)
         thread_embed = discord.Embed(
             description=f"📋 Обсуждение сбора **{title}**\n{hint}",
@@ -3311,8 +3405,9 @@ async def замена_cmd(ctx, кого: int, на_кого: int = 0):
             data.get("image_url"), data.get("note"),
             event_time=data.get("event_time"), closed=data.get("closed", False),
             reserve=data.get("reserve", []),
+            join_mode=data.get("cmd") == "list",
         )
-        view = PaginatedEventView(msg_id)
+        view = event_view(msg_id)
         await msg.edit(embed=embed, view=view)
     except Exception:
         pass
@@ -4807,7 +4902,7 @@ async def on_ready():
             bot.add_view(TicketPanelView(cat_id))
     for message_id, ev in event_lists.items():
         bot.add_view(ThreadListView(message_id))
-        bot.add_view(PaginatedEventView(message_id))
+        bot.add_view(event_view(message_id))
     await tree.sync()
     print(f"Bot online: {bot.user} (ID: {bot.user.id})")
     await bot.change_presence(activity=discord.Activity(

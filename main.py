@@ -2291,6 +2291,7 @@ async def _create_event_message(channel, guild, title: str, max_count: int, imag
         "slots": slots, "reserve": [], "image_url": image_ref, "note": None,
         "channel_id": channel.id, "thread_id": None, "thread_msg_id": None,
         "event_time": event_time, "closed": False, "cmd": cmd,
+        "created_at": now_msk().isoformat(), "reminded": False,
     }
 
     view = event_view(msg.id)
@@ -2418,6 +2419,57 @@ async def мп_cmd(ctx, количество: int = 10, *, название: str
     await _create_event_message(ctx.channel, ctx.guild, название, количество, image_file, image_ref, content=content, event_time=event_time, cmd="mp")
 
 
+@bot.command(name="vzh")
+async def взх_cmd(ctx, количество: int = 10, *, название: str = "ВЗХ"):
+    """!vzh <ЧЧ:ММ> [количество] [название] — сбор ВЗХ; за 30 минут до времени всем занявшим слот придёт напоминание в ЛС"""
+    if not can_run_event(ctx, "vzh"):
+        return await ctx.message.delete()
+
+    event_time = None
+    m = re.match(r'^(\d{1,2}:\d{2})\s*(.*)', название)
+    if m:
+        event_time = m.group(1)
+        название = m.group(2).strip() or "ВЗХ"
+
+    if not event_time:
+        try:
+            await ctx.message.delete()
+        except Exception:
+            pass
+        return await ctx.send(
+            "⚠️ Укажи время сбора первым: `!vzh 18:30 [количество] [название]`",
+            delete_after=8,
+        )
+
+    image_file = None
+    image_ref  = None
+    if ctx.message.attachments:
+        att = ctx.message.attachments[0]
+        try:
+            img_bytes  = await att.read()
+            ext        = att.filename.rsplit(".", 1)[-1].lower() if "." in att.filename else "png"
+            safe_name  = f"event_image.{ext}"
+            image_file = discord.File(io.BytesIO(img_bytes), filename=safe_name)
+            image_ref  = f"attachment://{safe_name}"
+        except Exception:
+            pass
+
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
+
+    mentions = []
+    vzp_role_id = vzp_roles.get(ctx.guild.id)
+    if vzp_role_id:
+        r = ctx.guild.get_role(vzp_role_id)
+        if r:
+            mentions.append(r.mention)
+    content = " ".join(mentions) if mentions else None
+
+    await _create_event_message(ctx.channel, ctx.guild, название, количество, image_file, image_ref, content=content, event_time=event_time, cmd="vzh")
+
+
 @bot.command(name="роль_взп")
 async def set_vzp_role(ctx, роль: discord.Role):
     """!роль_взп @роль — настроить роль ВЗП для тега в !vzp"""
@@ -2512,6 +2564,7 @@ async def set_event_role2(ctx, роль: discord.Role):
     app_commands.Choice(name="vzp", value="vzp"),
     app_commands.Choice(name="mp", value="mp"),
     app_commands.Choice(name="reaki", value="reaki"),
+    app_commands.Choice(name="vzh", value="vzh"),
 ])
 async def slash_event_access_add(interaction: discord.Interaction, тип: str, роль: discord.Role):
     if not is_admin(interaction):
@@ -2540,6 +2593,7 @@ async def slash_event_access_add(interaction: discord.Interaction, тип: str, 
     app_commands.Choice(name="vzp", value="vzp"),
     app_commands.Choice(name="mp", value="mp"),
     app_commands.Choice(name="reaki", value="reaki"),
+    app_commands.Choice(name="vzh", value="vzh"),
 ])
 async def slash_event_access_remove(interaction: discord.Interaction, тип: str, роль: discord.Role):
     if not is_admin(interaction):
@@ -4919,6 +4973,8 @@ async def on_ready():
         afk_expire_loop.start()
     if not inactive_expire_loop.is_running():
         inactive_expire_loop.start()
+    if not vzh_reminder_loop.is_running():
+        vzh_reminder_loop.start()
     if not vzp_monitor_loop.is_running():
         vzp_monitor_loop.start()
     for gid in list(roster_settings.keys()):
@@ -7030,28 +7086,41 @@ async def afk_expire_loop():
     for guild_id, users in list(afk_list.items()):
         expired = []
         for uid, data in users.items():
-            m = _re.match(r"^(\d{2})\.(\d{2})\s+(\d{2}):(\d{2})$", data.get("return_time", "").strip())
-            if not m:
-                continue
-            day, mon, hour, minute = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
-            since = data.get("since")
-            year = since.year if isinstance(since, datetime) else now_msk_dt.year
             try:
-                target = datetime(year, mon, day, hour, minute)
-            except ValueError:
-                continue
-            if isinstance(since, datetime) and target < since:
-                target = target.replace(year=year + 1)
-            if now_msk_dt >= target:
-                expired.append(uid)
+                m = _re.match(r"^(\d{2})\.(\d{2})\s+(\d{2}):(\d{2})$", data.get("return_time", "").strip())
+                if not m:
+                    continue
+                day, mon, hour, minute = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+                since = data.get("since")
+                year = since.year if isinstance(since, datetime) else now_msk_dt.year
+                try:
+                    target = datetime(year, mon, day, hour, minute)
+                except ValueError:
+                    continue
+                if isinstance(since, datetime) and target < since:
+                    target = target.replace(year=year + 1)
+                if now_msk_dt >= target:
+                    expired.append(uid)
+            except Exception as e:
+                print(f"WARNING: afk_expire_loop entry {guild_id}/{uid}: {e}")
         if not expired:
             continue
         for uid in expired:
             afk_list[guild_id].pop(uid, None)
         save_data()
-        guild = bot.get_guild(guild_id)
-        if guild:
-            await refresh_afk_message(guild)
+        try:
+            guild = bot.get_guild(guild_id)
+            if guild:
+                await refresh_afk_message(guild)
+        except Exception as e:
+            print(f"WARNING: afk_expire_loop refresh {guild_id}: {e}")
+
+
+@afk_expire_loop.error
+async def afk_expire_loop_error(error: Exception):
+    print(f"WARNING: afk_expire_loop crashed, restarting: {error}")
+    if not afk_expire_loop.is_running():
+        afk_expire_loop.start()
 
 
 # ─────────────────────────────────────────────
@@ -7067,23 +7136,94 @@ async def inactive_expire_loop():
     for guild_id, users in list(inactive_list.items()):
         expired = []
         for uid, entry in users.items():
-            m = _re.match(r"^(\d{2})\.(\d{2})\.(\d{4})$", entry.get("return_date", "").strip())
-            if not m:
-                continue
             try:
-                rd = _date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
-            except ValueError:
-                continue
-            if today >= rd:
-                expired.append(uid)
+                m = _re.match(r"^(\d{2})\.(\d{2})\.(\d{4})$", entry.get("return_date", "").strip())
+                if not m:
+                    continue
+                try:
+                    rd = _date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+                except ValueError:
+                    continue
+                if today >= rd:
+                    expired.append(uid)
+            except Exception as e:
+                print(f"WARNING: inactive_expire_loop entry {guild_id}/{uid}: {e}")
         if not expired:
             continue
         for uid in expired:
             inactive_list[guild_id].pop(uid, None)
         save_data()
-        guild = bot.get_guild(guild_id)
-        if guild:
-            await refresh_inactive_message(guild)
+        try:
+            guild = bot.get_guild(guild_id)
+            if guild:
+                await refresh_inactive_message(guild)
+        except Exception as e:
+            print(f"WARNING: inactive_expire_loop refresh {guild_id}: {e}")
+
+
+@inactive_expire_loop.error
+async def inactive_expire_loop_error(error: Exception):
+    print(f"WARNING: inactive_expire_loop crashed, restarting: {error}")
+    if not inactive_expire_loop.is_running():
+        inactive_expire_loop.start()
+
+
+# ─────────────────────────────────────────────
+# НАПОМИНАНИЕ О ВЗХ — ЛС за 30 минут занявшим слот
+# ─────────────────────────────────────────────
+
+@tasks.loop(minutes=1)
+async def vzh_reminder_loop():
+    """Каждую минуту проверяет сборы !vzh и за 30 минут до времени шлёт ЛС-напоминание тем, кто занял слот."""
+    import re as _re
+    now_msk_dt = now_msk()
+    for msg_id, ev in list(event_lists.items()):
+        if ev.get("cmd") != "vzh" or ev.get("closed") or ev.get("reminded"):
+            continue
+        try:
+            m = _re.match(r"^(\d{1,2}):(\d{2})$", (ev.get("event_time") or "").strip())
+            if not m:
+                continue
+            hour, minute = int(m.group(1)), int(m.group(2))
+            created_at = ev.get("created_at")
+            anchor = datetime.fromisoformat(created_at) if created_at else now_msk_dt
+            try:
+                target = anchor.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            except ValueError:
+                continue
+            if target < anchor:
+                target += timedelta(days=1)
+            remind_at = target - timedelta(minutes=30)
+            if not (remind_at <= now_msk_dt < target):
+                continue
+
+            recipients = [uid for uid in ev.get("slots", {}).values() if uid]
+            for uid in recipients:
+                try:
+                    user = await bot.fetch_user(uid)
+                    embed = discord.Embed(
+                        title="⏰ Напоминание о сборе ВЗХ",
+                        description=(
+                            f"**{ev.get('title', 'ВЗХ')}**\n"
+                            f"Начало в `{ev.get('event_time')}` — через 30 минут!"
+                        ),
+                        color=discord.Color.orange(),
+                    )
+                    await user.send(embed=embed)
+                except Exception as e:
+                    print(f"WARNING: vzh_reminder_loop DM {uid}: {e}")
+
+            ev["reminded"] = True
+            save_data()
+        except Exception as e:
+            print(f"WARNING: vzh_reminder_loop event {msg_id}: {e}")
+
+
+@vzh_reminder_loop.error
+async def vzh_reminder_loop_error(error: Exception):
+    print(f"WARNING: vzh_reminder_loop crashed, restarting: {error}")
+    if not vzh_reminder_loop.is_running():
+        vzh_reminder_loop.start()
 
 
 # ─────────────────────────────────────────────

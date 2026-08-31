@@ -142,6 +142,12 @@ vzp_roles2: dict = {}
 # 🏎 ВТОРАЯ РОЛЬ МП { guild_id: role_id }
 mp_roles2: dict = {}
 
+# ⛏ РОЛЬ ВЗХ { guild_id: role_id }
+vzh_roles: dict = {}
+
+# ⛏ ВТОРАЯ РОЛЬ ВЗХ { guild_id: role_id }
+vzh_roles2: dict = {}
+
 # 🎯 ВТОРАЯ РОЛЬ LIST/РЕАКИ { guild_id: role_id }
 list_roles2: dict = {}
 
@@ -834,6 +840,8 @@ def save_data():
         "mp_roles2":            {str(g): v for g, v in mp_roles2.items()},
         "vzp_roles":            {str(g): v for g, v in vzp_roles.items()},
         "vzp_roles2":           {str(g): v for g, v in vzp_roles2.items()},
+        "vzh_roles":            {str(g): v for g, v in vzh_roles.items()},
+        "vzh_roles2":           {str(g): v for g, v in vzh_roles2.items()},
         "list_roles2":          {str(g): v for g, v in list_roles2.items()},
         "warn_roles":           {str(g): {str(k): v for k, v in wr.items()} for g, wr in warn_roles.items()},
         "admin_roles":          {str(g): v for g, v in admin_roles.items()},
@@ -966,6 +974,10 @@ def load_data():
             vzp_roles[int(g)] = v
         for g, v in data.get("vzp_roles2", {}).items():
             vzp_roles2[int(g)] = v
+        for g, v in data.get("vzh_roles", {}).items():
+            vzh_roles[int(g)] = v
+        for g, v in data.get("vzh_roles2", {}).items():
+            vzh_roles2[int(g)] = v
         for g, v in data.get("mp_roles2", {}).items():
             mp_roles2[int(g)] = v
         for g, v in data.get("list_roles2", {}).items():
@@ -2514,9 +2526,14 @@ async def взх_cmd(ctx, *, args: str = ""):
         pass
 
     mentions = []
-    vzp_role_id = vzp_roles.get(ctx.guild.id)
-    if vzp_role_id:
-        r = ctx.guild.get_role(vzp_role_id)
+    vzh_role_id = vzh_roles.get(ctx.guild.id)
+    if vzh_role_id:
+        r = ctx.guild.get_role(vzh_role_id)
+        if r:
+            mentions.append(r.mention)
+    vzh2_role_id = vzh_roles2.get(ctx.guild.id)
+    if vzh2_role_id:
+        r = ctx.guild.get_role(vzh2_role_id)
         if r:
             mentions.append(r.mention)
     content = " ".join(mentions) if mentions else None
@@ -2568,6 +2585,40 @@ async def set_vzp_role2(ctx, роль: discord.Role):
     embed = discord.Embed(
         title="✅ Доп. роль ВЗП настроена",
         description=f"В `!vzp` дополнительно будет тегаться {роль.mention}",
+        color=discord.Color.green(),
+    )
+    embed.set_footer(text="DIAMOND", icon_url=_footer(ctx.guild.id))
+    await ctx.send(embed=embed, delete_after=10)
+    await ctx.message.delete()
+
+
+@bot.command(name="роль_взх")
+async def set_vzh_role(ctx, роль: discord.Role):
+    """!роль_взх @роль — настроить роль ВЗХ для тега в !vzh"""
+    if not is_admin_ctx(ctx):
+        return await ctx.message.delete()
+    vzh_roles[ctx.guild.id] = роль.id
+    save_data()
+    embed = discord.Embed(
+        title="✅ Роль ВЗХ настроена",
+        description=f"В `!vzh` будет тегаться {роль.mention}",
+        color=discord.Color.green(),
+    )
+    embed.set_footer(text="DIAMOND", icon_url=_footer(ctx.guild.id))
+    await ctx.send(embed=embed, delete_after=10)
+    await ctx.message.delete()
+
+
+@bot.command(name="роль_взх2")
+async def set_vzh_role2(ctx, роль: discord.Role):
+    """!роль_взх2 @роль — дополнительная роль для тега в !vzh"""
+    if not is_admin_ctx(ctx):
+        return await ctx.message.delete()
+    vzh_roles2[ctx.guild.id] = роль.id
+    save_data()
+    embed = discord.Embed(
+        title="✅ Доп. роль ВЗХ настроена",
+        description=f"В `!vzh` дополнительно будет тегаться {роль.mention}",
         color=discord.Color.green(),
     )
     embed.set_footer(text="DIAMOND", icon_url=_footer(ctx.guild.id))
@@ -3541,7 +3592,7 @@ async def set_admin_role(ctx, роль: discord.Role):
         description=(
             f"Теперь все команды бота доступны для {роль.mention}.\n\n"
             f"Следующий шаг — настрой остальные роли и панели:\n"
-            f"`!роль_взп` `!роль_мп` `!роль_реаки` `!роль_варн`\n"
+            f"`!роль_взп` `!роль_взх` `!роль_мп` `!роль_реаки` `!роль_варн`\n"
             f"`/тикет` `/тикет_менеджер` `/магазин` `/настройки`"
         ),
         color=discord.Color.green(),
@@ -3630,6 +3681,7 @@ async def slash_settings(interaction: discord.Interaction):
             f"Доп. админ-роли: {extra_admins_str}\n"
             f"Тикет-менеджер: {role_str(ticket_manager_roles.get(gid))}\n"
             f"Роль ВЗП: {role_str(vzp_roles.get(gid))}\n"
+            f"Роль ВЗХ: {role_str(vzh_roles.get(gid))}\n"
             f"Роль МП: {role_str(mp_roles.get(gid))}\n"
             f"Роль list: {role_str(event_roles.get(gid))}\n"
             f"Варн 1/3: {role_str(wr.get(1))}\n"
@@ -3735,6 +3787,7 @@ def build_cfg_main_embed(guild: discord.Guild) -> discord.Embed:
     e.add_field(name="🔑 Роли", value=(
         f"МП: {_rs(guild, mp_roles.get(gid))}\n"
         f"ВЗП: {_rs(guild, vzp_roles.get(gid))}\n"
+        f"ВЗХ: {_rs(guild, vzh_roles.get(gid))}\n"
         f"Реаки: {_rs(guild, event_roles.get(gid))}\n"
         f"Магазин: {_rs(guild, shop_manager_roles.get(gid))}"
     ), inline=True)
@@ -3798,13 +3851,15 @@ def build_cfg_category_embed(guild: discord.Guild, category: str) -> discord.Emb
         e.description = (
             f"**МП:** {_rs(guild, mp_roles.get(gid))}\n"
             f"**ВЗП:** {_rs(guild, vzp_roles.get(gid))}\n"
-            f"**Реаки:** {_rs(guild, event_roles.get(gid))}\n"
-            f"**Магазин (менеджер):** {_rs(guild, shop_manager_roles.get(gid))}"
+            f"**ВЗХ:** {_rs(guild, vzh_roles.get(gid))}\n"
+            f"**Реаки:** {_rs(guild, event_roles.get(gid))}\n\n"
+            f"*Роль магазина (менеджер) настраивается в разделе «🧩 Прочее».*"
         )
     elif category == "roles2":
         e.title = "➕ Дополнительные роли тега"
         e.description = (
             f"**ВЗП2:** {_rs(guild, vzp_roles2.get(gid))}\n"
+            f"**ВЗХ2:** {_rs(guild, vzh_roles2.get(gid))}\n"
             f"**МП2:** {_rs(guild, mp_roles2.get(gid))}\n"
             f"**Реаки2:** {_rs(guild, list_roles2.get(gid))}\n\n"
             f"*Тегаются дополнительно вместе с основными ролями.*"
@@ -3886,7 +3941,8 @@ def build_cfg_category_embed(guild: discord.Guild, category: str) -> discord.Emb
         e.description = (
             f"**Канал обзвона (интервью):** {_cs(guild, interview_channels.get(gid))}\n"
             f"**Лог общака:** {_cs(guild, obshak_log_channels.get(gid))}\n"
-            f"**Пинг-роль общака:** {_rs(guild, obshak_ping_roles.get(gid))}"
+            f"**Пинг-роль общака:** {_rs(guild, obshak_ping_roles.get(gid))}\n"
+            f"**Магазин (менеджер):** {_rs(guild, shop_manager_roles.get(gid))}"
         )
     elif category == "content":
         fs = feedback_settings.get(gid) or {}
@@ -3932,7 +3988,7 @@ class CfgCategorySelect(ui.Select):
     def __init__(self):
         options = [
             discord.SelectOption(label="📋 Заявки",        value="tickets", description="Менеджер, пинг, лог, доступ, текст"),
-            discord.SelectOption(label="🔑 Роли системы",  value="roles",   description="МП, ВЗП, Реаки, Магазин"),
+            discord.SelectOption(label="🔑 Роли системы",  value="roles",   description="МП, ВЗП, ВЗХ, Реаки"),
             discord.SelectOption(label="⚠️ Варн-роли",     value="warns",   description="Роли за 1, 2, 3 предупреждения"),
             discord.SelectOption(label="📢 Каналы / Логи", value="logs",    description="Логи и feedback канал/роль"),
             discord.SelectOption(label="🎯 Сборы",          value="events",  description="Доступ к !vzp !mp !list"),
@@ -3940,7 +3996,7 @@ class CfgCategorySelect(ui.Select):
             discord.SelectOption(label="🛎 Приватные комнаты", value="private", description="Триггер, категория, канал панели"),
             discord.SelectOption(label="👥 Состав семьи",   value="roster",  description="Роли основного/академии, панель"),
             discord.SelectOption(label="📜 Контракты",      value="contracts", description="Роль тега, текст, фото панели"),
-            discord.SelectOption(label="🧩 Прочее",         value="misc",    description="Обзвон, общак: лог и пинг-роль"),
+            discord.SelectOption(label="🧩 Прочее",         value="misc",    description="Обзвон, общак, роль магазина"),
             discord.SelectOption(label="🖼 Контент",        value="content", description="Тексты, фото, ссылки панелей"),
             discord.SelectOption(label="💾 Бэкапы",         value="backup",  description="Канал, файлы и период автобэкапа"),
         ]
@@ -4212,8 +4268,9 @@ class _CfgRolesView(ui.View):
 
         self.add_item(_CfgRolePicker(lambda gid, rid: mp_roles.__setitem__(gid, rid), "roles", 1, "🏎 МП — выбери роль"))
         self.add_item(_CfgRolePicker(lambda gid, rid: vzp_roles.__setitem__(gid, rid), "roles", 2, "⚔️ ВЗП — выбери роль"))
-        self.add_item(_CfgRolePicker(lambda gid, rid: event_roles.__setitem__(gid, rid), "roles", 3, "🎯 Реаки — выбери роль"))
-        self.add_item(_CfgRolePicker(lambda gid, rid: shop_manager_roles.__setitem__(gid, rid), "roles", 4, "🛍 Магазин — выбери роль"))
+        self.add_item(_CfgRolePicker(lambda gid, rid: vzh_roles.__setitem__(gid, rid), "roles", 3, "⛏ ВЗХ — выбери роль"))
+        self.add_item(_CfgRolePicker(lambda gid, rid: event_roles.__setitem__(gid, rid), "roles", 4, "🎯 Реаки — выбери роль"))
+        # Роль магазина настраивается на странице «Доп. роли» (row-лимит: 4 селекта на страницу)
 
 
 class _CfgRoles2View(ui.View):
@@ -4225,8 +4282,9 @@ class _CfgRoles2View(ui.View):
         back.callback = _back
         self.add_item(back)
         self.add_item(_CfgRolePicker(lambda gid, rid: vzp_roles2.__setitem__(gid, rid), "roles2", 1, "⚔️ ВЗП2 — доп. роль тега"))
-        self.add_item(_CfgRolePicker(lambda gid, rid: mp_roles2.__setitem__(gid, rid), "roles2", 2, "🏎 МП2 — доп. роль тега"))
-        self.add_item(_CfgRolePicker(lambda gid, rid: list_roles2.__setitem__(gid, rid), "roles2", 3, "🎯 Реаки2 — доп. роль тега"))
+        self.add_item(_CfgRolePicker(lambda gid, rid: vzh_roles2.__setitem__(gid, rid), "roles2", 2, "⛏ ВЗХ2 — доп. роль тега"))
+        self.add_item(_CfgRolePicker(lambda gid, rid: mp_roles2.__setitem__(gid, rid), "roles2", 3, "🏎 МП2 — доп. роль тега"))
+        self.add_item(_CfgRolePicker(lambda gid, rid: list_roles2.__setitem__(gid, rid), "roles2", 4, "🎯 Реаки2 — доп. роль тега"))
 
 
 class _CfgWarnsView(ui.View):
@@ -4447,6 +4505,8 @@ class _CfgMiscView(ui.View):
             "💰 Лог канал общака"))
         self.add_item(_CfgRolePicker(lambda gid, rid: obshak_ping_roles.__setitem__(gid, rid), "misc", 3,
             "🔔 Пинг-роль общака"))
+        self.add_item(_CfgRolePicker(lambda gid, rid: shop_manager_roles.__setitem__(gid, rid), "misc", 4,
+            "🛍 Магазин — роль менеджера"))
 
 
 class _CfgContentView(ui.View):

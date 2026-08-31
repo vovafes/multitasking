@@ -145,6 +145,14 @@ mp_roles2: dict = {}
 # 🎯 ВТОРАЯ РОЛЬ LIST/РЕАКИ { guild_id: role_id }
 list_roles2: dict = {}
 
+# 💾 РЕЗЕРВНОЕ КОПИРОВАНИЕ ФАЙЛОВ ДАННЫХ
+# { guild_id: { "channel_id": int, "interval_hours": int, "files": [str, ...], "last_backup": str|None } }
+backup_settings: dict = {}
+
+BACKUP_AVAILABLE_FILES = [
+    "data.json", "points.json", "chips.json", "roulette.json",
+]
+
 # 🎯 РОЛИ ДОСТУПА К КОМАНДАМ СБОРОВ { guild_id: { "vzp": [role_id,...], "mp": [...], "list": [...] } }
 event_command_roles: dict = {}
 
@@ -864,6 +872,7 @@ def save_data():
         "message_counts":        {str(g): {str(u): v for u, v in us.items()} for g, us in message_counts.items()},
         "voice_minutes":         {str(g): {str(u): v for u, v in us.items()} for g, us in voice_minutes.items()},
         "stats_panels":          {str(g): v for g, v in stats_panels.items()},
+        "backup_settings":       {str(g): v for g, v in backup_settings.items()},
     }
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -1079,6 +1088,8 @@ def load_data():
         # Панели статистики GTA5RP
         for g, v in data.get("stats_panels", {}).items():
             stats_panels[int(g)] = v
+        for g, v in data.get("backup_settings", {}).items():
+            backup_settings[int(g)] = v
 
         print("OK: Data loaded from data.json")
     except Exception as e:
@@ -3711,6 +3722,12 @@ def build_cfg_main_embed(guild: discord.Guild) -> discord.Embed:
         f"Ссылка кабинета: {'✅' if cabinet_invite_links.get(gid) else '⚠️ нет'}\n"
         f"Fb-роль: {_rs(guild, fs.get('ping_role_id'))}"
     ), inline=True)
+    bs = backup_settings.get(gid, {})
+    e.add_field(name="💾 Бэкапы", value=(
+        f"Канал: {_cs(guild, bs.get('channel_id'))}\n"
+        f"Период: **{bs.get('interval_hours', 1)}** ч.\n"
+        f"Файлов выбрано: {len(bs.get('files', []))}"
+    ), inline=True)
     e.set_footer(text="DIAMOND • Настройки сервера", icon_url=_footer(guild.id))
     return e
 
@@ -3851,6 +3868,18 @@ def build_cfg_category_embed(guild: discord.Guild, category: str) -> discord.Emb
             f"GIF одобрения: {'✅' if br.get('approve_gif') else '⚠️ по умолчанию'}  "
             f"АФК фото: {'✅' if br.get('afk_image') else '⚠️ по умолчанию'}"
         )
+    elif category == "backup":
+        bs = backup_settings.get(gid, {})
+        files = bs.get("files", [])
+        last = bs.get("last_backup")
+        e.title = "💾 Резервное копирование"
+        e.description = (
+            f"**Канал:** {_cs(guild, bs.get('channel_id'))}\n"
+            f"**Период:** каждые **{bs.get('interval_hours', 1)}** ч.\n"
+            f"**Последний бэкап:** {last or '*ещё не было*'}\n\n"
+            f"**Файлы для отправки:**\n"
+            + ("\n".join(f"✅ {fn}" for fn in files) if files else "*ничего не выбрано*")
+        )
     return e
 
 
@@ -3870,6 +3899,7 @@ class CfgCategorySelect(ui.Select):
             discord.SelectOption(label="📜 Контракты",      value="contracts", description="Роль тега, текст, фото панели"),
             discord.SelectOption(label="🧩 Прочее",         value="misc",    description="Обзвон, общак: лог и пинг-роль"),
             discord.SelectOption(label="🖼 Контент",        value="content", description="Тексты, фото, ссылки панелей"),
+            discord.SelectOption(label="💾 Бэкапы",         value="backup",  description="Канал, файлы и период автобэкапа"),
         ]
         super().__init__(placeholder="Выбери категорию настроек…", options=options, row=0)
 
@@ -4458,6 +4488,84 @@ class _CfgContentView(ui.View):
             "content", row=4))
 
 
+# ── Резервное копирование ─────────────────────────────────────────────────────
+
+BACKUP_INTERVAL_CHOICES = [1, 3, 6, 12, 24, 48]
+
+
+class _CfgBackupFilesSelect(ui.Select):
+    """Мультивыбор файлов, которые бот будет слать в канал бэкапов."""
+    def __init__(self, guild_id: int):
+        selected = set(backup_settings.get(guild_id, {}).get("files", []))
+        options = [
+            discord.SelectOption(label=fn, value=fn, default=(fn in selected))
+            for fn in BACKUP_AVAILABLE_FILES
+        ]
+        super().__init__(
+            placeholder="📁 Какие файлы бэкапить…",
+            options=options, row=2,
+            min_values=0, max_values=len(options),
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        backup_settings.setdefault(interaction.guild_id, {})["files"] = list(self.values)
+        save_data()
+        await interaction.response.send_message(
+            f"✅ Выбрано файлов: **{len(self.values)}**", ephemeral=True)
+        embed = build_cfg_category_embed(interaction.guild, "backup")
+        await interaction.message.edit(embed=embed, view=_CfgBackupView(interaction.guild))
+
+
+class _CfgBackupIntervalSelect(ui.Select):
+    """Как часто (в часах) отправлять бэкап."""
+    def __init__(self, guild_id: int):
+        current = backup_settings.get(guild_id, {}).get("interval_hours", 1)
+        options = [
+            discord.SelectOption(label=f"Каждые {h} ч.", value=str(h), default=(h == current))
+            for h in BACKUP_INTERVAL_CHOICES
+        ]
+        super().__init__(placeholder="⏱ Период автобэкапа…", options=options, row=3)
+
+    async def callback(self, interaction: discord.Interaction):
+        backup_settings.setdefault(interaction.guild_id, {})["interval_hours"] = int(self.values[0])
+        save_data()
+        await interaction.response.send_message(
+            f"✅ Период: каждые **{self.values[0]}** ч.", ephemeral=True)
+        embed = build_cfg_category_embed(interaction.guild, "backup")
+        await interaction.message.edit(embed=embed, view=_CfgBackupView(interaction.guild))
+
+
+class _CfgBackupView(ui.View):
+    def __init__(self, guild: discord.Guild):
+        super().__init__(timeout=300)
+        gid = guild.id
+        backup_settings.setdefault(gid, {"channel_id": None, "interval_hours": 1, "files": [], "last_backup": None})
+
+        back = _cfg_btn("◀ Назад", row=0)
+        async def _back(inter): await inter.response.edit_message(embed=build_cfg_main_embed(inter.guild), view=CfgMainView())
+        back.callback = _back
+        self.add_item(back)
+
+        btn_now = _cfg_btn("📤 Отправить сейчас", style=discord.ButtonStyle.primary, row=0)
+        async def _now(inter):
+            bs = backup_settings.get(inter.guild_id, {})
+            if not bs.get("channel_id"):
+                return await inter.response.send_message("❌ Сначала выбери канал для бэкапов.", ephemeral=True)
+            if not bs.get("files"):
+                return await inter.response.send_message("❌ Сначала выбери хотя бы один файл.", ephemeral=True)
+            await inter.response.defer(ephemeral=True)
+            ok = await send_backup_now(inter.guild)
+            await inter.followup.send("✅ Бэкап отправлен." if ok else "❌ Не удалось отправить бэкап (проверь канал/права).", ephemeral=True)
+        btn_now.callback = _now
+        self.add_item(btn_now)
+
+        self.add_item(_CfgChannelPicker(
+            lambda gid_, cid: backup_settings.setdefault(gid_, {}).__setitem__("channel_id", cid),
+            "backup", 1, "💾 Канал для бэкапов"))
+        self.add_item(_CfgBackupFilesSelect(gid))
+        self.add_item(_CfgBackupIntervalSelect(gid))
+
+
 # ── Фабрика view по ключу категории ──────────────────────────────────────────
 
 def _cfg_make_view(guild: discord.Guild, cat: str) -> ui.View:
@@ -4477,6 +4585,7 @@ def _cfg_make_view(guild: discord.Guild, cat: str) -> ui.View:
     if cat == "contracts":      return _CfgContractsView(guild)
     if cat == "misc":           return _CfgMiscView(guild)
     if cat == "content":        return _CfgContentView(guild)
+    if cat == "backup":         return _CfgBackupView(guild)
     return CfgMainView()
 
 
@@ -4973,6 +5082,8 @@ async def on_ready():
         afk_expire_loop.start()
     if not inactive_expire_loop.is_running():
         inactive_expire_loop.start()
+    if not backup_scheduler_loop.is_running():
+        backup_scheduler_loop.start()
     if not vzh_reminder_loop.is_running():
         vzh_reminder_loop.start()
     if not vzp_monitor_loop.is_running():
@@ -7166,6 +7277,87 @@ async def inactive_expire_loop_error(error: Exception):
     print(f"WARNING: inactive_expire_loop crashed, restarting: {error}")
     if not inactive_expire_loop.is_running():
         inactive_expire_loop.start()
+
+
+# ─────────────────────────────────────────────
+# РЕЗЕРВНОЕ КОПИРОВАНИЕ — отправка выбранных файлов в канал
+# ─────────────────────────────────────────────
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+async def send_backup_now(guild: discord.Guild) -> bool:
+    """Собирает выбранные файлы и шлёт их в настроенный канал бэкапов. True при успехе."""
+    bs = backup_settings.get(guild.id, {})
+    channel_id = bs.get("channel_id")
+    filenames  = bs.get("files", [])
+    if not channel_id or not filenames:
+        return False
+    channel = guild.get_channel(channel_id) or bot.get_channel(channel_id)
+    if channel is None:
+        return False
+
+    save_data()  # актуализировать data.json перед отправкой
+
+    files = []
+    missing = []
+    for fn in filenames:
+        path = os.path.join(BASE_DIR, fn)
+        if os.path.exists(path):
+            files.append(path)
+        else:
+            missing.append(fn)
+
+    ts = now_msk().strftime("%d.%m.%Y %H:%M")
+    sent_any = False
+    try:
+        for i in range(0, len(files), 10):
+            chunk = files[i:i + 10]
+            await channel.send(
+                content=f"💾 Автобэкап · {ts} (МСК)" if i == 0 else None,
+                files=[discord.File(p, filename=os.path.basename(p)) for p in chunk],
+            )
+            sent_any = True
+        if missing:
+            await channel.send(f"⚠️ Не найдены файлы: {', '.join(missing)}")
+    except discord.HTTPException as e:
+        print(f"WARNING: backup send failed for guild {guild.id}: {e}")
+        return False
+
+    if sent_any:
+        bs["last_backup"] = ts
+        save_data()
+    return sent_any
+
+
+@tasks.loop(minutes=15)
+async def backup_scheduler_loop():
+    """Раз в 15 минут проверяет, для каких серверов настало время автобэкапа."""
+    now = now_msk()
+    for guild_id, bs in list(backup_settings.items()):
+        if not bs.get("channel_id") or not bs.get("files"):
+            continue
+        interval = bs.get("interval_hours", 1)
+        last = bs.get("last_backup")
+        try:
+            last_dt = datetime.strptime(last, "%d.%m.%Y %H:%M") if last else None
+        except ValueError:
+            last_dt = None
+        if last_dt and now - last_dt < timedelta(hours=interval):
+            continue
+        guild = bot.get_guild(guild_id)
+        if guild:
+            try:
+                await send_backup_now(guild)
+            except Exception as e:
+                print(f"WARNING: backup_scheduler_loop guild={guild_id}: {e}")
+
+
+@backup_scheduler_loop.error
+async def backup_scheduler_loop_error(error: Exception):
+    print(f"WARNING: backup_scheduler_loop crashed, restarting: {error}")
+    if not backup_scheduler_loop.is_running():
+        backup_scheduler_loop.start()
 
 
 # ─────────────────────────────────────────────

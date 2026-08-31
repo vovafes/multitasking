@@ -1432,6 +1432,43 @@ def event_view(message_id: int) -> ui.View:
     return PaginatedEventView(message_id)
 
 
+async def _remove_user_from_all_events(guild_id: int, user_id: int):
+    """Убирает пользователя из слотов/резерва всех активных сборов сервера (например, при уходе в АФК)."""
+    for msg_id, data in list(event_lists.items()):
+        channel = bot.get_channel(data.get("channel_id"))
+        if not channel or channel.guild.id != guild_id:
+            continue
+
+        slots   = data.get("slots", {})
+        reserve = data.setdefault("reserve", [])
+        changed = False
+        for slot_num, uid in slots.items():
+            if uid == user_id:
+                slots[slot_num] = None
+                changed = True
+        if user_id in reserve:
+            reserve.remove(user_id)
+            changed = True
+        if not changed:
+            continue
+
+        try:
+            orig_msg = await channel.fetch_message(msg_id)
+            embed = build_event_embed(
+                guild_id, data["title"], data["max"], slots,
+                data.get("image_url"), data.get("note"),
+                event_time=data.get("event_time"), closed=data.get("closed", False),
+                reserve=reserve,
+                join_mode=data.get("cmd") == "list",
+            )
+            view = event_view(msg_id)
+            await orig_msg.edit(embed=embed, view=view)
+        except Exception:
+            pass
+        await update_thread_list(msg_id)
+    save_data()
+
+
 # ─────────────────────────────────────────────
 # МОДАЛКИ
 # ─────────────────────────────────────────────
@@ -1469,6 +1506,7 @@ class AfkModal(ui.Modal, title="🕐 Уход в АФК"):
         save_data()
 
         await refresh_afk_message(interaction.guild)
+        await _remove_user_from_all_events(guild_id, user_id)
 
         embed = discord.Embed(
             description=(
@@ -2431,16 +2469,21 @@ async def мп_cmd(ctx, количество: int = 10, *, название: str
 
 
 @bot.command(name="vzh")
-async def взх_cmd(ctx, количество: int = 10, *, название: str = "ВЗХ"):
+async def взх_cmd(ctx, *, args: str = ""):
     """!vzh <ЧЧ:ММ> [количество] [название] — сбор ВЗХ; за 30 минут до времени всем занявшим слот придёт напоминание в ЛС"""
     if not can_run_event(ctx, "vzh"):
         return await ctx.message.delete()
 
     event_time = None
-    m = re.match(r'^(\d{1,2}:\d{2})\s*(.*)', название)
+    количество = 10
+    название = "ВЗХ"
+    m = re.match(r'^(\d{1,2}:\d{2})(?:\s+(\d+))?(?:\s+(.*))?$', args.strip())
     if m:
         event_time = m.group(1)
-        название = m.group(2).strip() or "ВЗХ"
+        if m.group(2):
+            количество = int(m.group(2))
+        if m.group(3) and m.group(3).strip():
+            название = m.group(3).strip()
 
     if not event_time:
         try:
@@ -7205,7 +7248,7 @@ async def afk_expire_loop():
                 since = data.get("since")
                 year = since.year if isinstance(since, datetime) else now_msk_dt.year
                 try:
-                    target = datetime(year, mon, day, hour, minute)
+                    target = datetime(year, mon, day, hour, minute, tzinfo=MSK)
                 except ValueError:
                     continue
                 if isinstance(since, datetime) and target < since:

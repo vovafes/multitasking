@@ -465,7 +465,7 @@ class KickModal(ui.Modal, title="Кикнуть из списка"):
                 data.get("image_url"), data.get("note"),
                 event_time=data.get("event_time"), closed=data.get("closed", False),
                 reserve=reserve,
-                join_mode=data.get("cmd") == "list",
+                join_mode=data.get("cmd") in ("list", "vzh"),
             )
             view = event_view(self.message_id)
             await orig_msg.edit(embed=embed, view=view)
@@ -522,7 +522,7 @@ class CloseListButton(ui.Button):
                 data.get("image_url"), data.get("note"),
                 event_time=data.get("event_time"), closed=data["closed"],
                 reserve=data.get("reserve", []),
-                join_mode=data.get("cmd") == "list",
+                join_mode=data.get("cmd") in ("list", "vzh"),
             )
             view = event_view(self.message_id)
             await orig_msg.edit(embed=embed, view=view)
@@ -589,7 +589,7 @@ class PromoteFromReserveModal(ui.Modal, title="Убрать с резерва в
                 data.get("image_url"), data.get("note"),
                 event_time=data.get("event_time"), closed=data.get("closed", False),
                 reserve=reserve,
-                join_mode=data.get("cmd") == "list",
+                join_mode=data.get("cmd") in ("list", "vzh"),
             )
             view = event_view(self.message_id)
             await orig_msg.edit(embed=embed, view=view)
@@ -1185,7 +1185,7 @@ class SlotButton(ui.Button):
             event_time=data.get("event_time"), closed=data.get("closed", False),
             reserve=reserve,
         )
-        join_mode=data.get("cmd") == "list",
+        join_mode=data.get("cmd") in ("list", "vzh"),
         await interaction.response.defer()
         await interaction.message.edit(embed=embed, view=new_view)
         await update_thread_list(self.message_id)
@@ -1232,7 +1232,7 @@ class ReserveButton(ui.Button):
             data.get("image_url"), data.get("note"),
             event_time=data.get("event_time"), closed=data.get("closed", False),
             reserve=reserve,
-            join_mode=data.get("cmd") == "list",
+            join_mode=data.get("cmd") in ("list", "vzh"),
         )
         view = event_view(self.message_id)
         await interaction.response.defer()
@@ -1269,7 +1269,7 @@ class DeleteImageButton(ui.Button):
             None, data.get("note"),
             event_time=data.get("event_time"), closed=data.get("closed", False),
             reserve=data.get("reserve", []),
-            join_mode=data.get("cmd") == "list",
+            join_mode=data.get("cmd") in ("list", "vzh"),
         )
         view = event_view(self.message_id)
         await interaction.response.edit_message(embed=embed, view=view, attachments=[])
@@ -1439,7 +1439,7 @@ class JoinEventView(ui.View):
 def event_view(message_id: int) -> ui.View:
     """Выбирает вид кнопок сбора: одна «Записаться» для !list, слоты — для остальных."""
     data = event_lists.get(message_id)
-    if data and data.get("cmd") == "list":
+    if data and data.get("cmd") in ("list", "vzh"):
         return JoinEventView(message_id)
     return PaginatedEventView(message_id)
 
@@ -1471,7 +1471,7 @@ async def _remove_user_from_all_events(guild_id: int, user_id: int):
                 data.get("image_url"), data.get("note"),
                 event_time=data.get("event_time"), closed=data.get("closed", False),
                 reserve=reserve,
-                join_mode=data.get("cmd") == "list",
+                join_mode=data.get("cmd") in ("list", "vzh"),
             )
             view = event_view(msg_id)
             await orig_msg.edit(embed=embed, view=view)
@@ -1566,7 +1566,7 @@ class RejectModal(ui.Modal, title="❌ Причина отклонения"):
                 color=discord.Color.red(),
                 timestamp=datetime.now(),
             )
-            dm_embed.add_field(name="📅 Дата", value=datetime.now().strftime("%d.%m.%Y %H:%M"))
+            dm_embed.add_field(name="📅 Дата", value=now_msk().strftime("%d.%m.%Y %H:%M") + " МСК")
             dm_embed.set_footer(text="DIAMOND", icon_url=_footer(interaction.guild_id))
             await target.send(embed=dm_embed)
         except Exception:
@@ -1746,7 +1746,7 @@ class InactiveModal(ui.Modal, title="📅 Уход в инактив"):
         inactive_list[guild_id][user_id] = {
             "reason":      str(self.reason),
             "return_date": raw,
-            "since":       datetime.now(),
+            "since":       now_msk(),
         }
         save_data()
 
@@ -1971,7 +1971,7 @@ class ApplicationReviewView(ui.View):
         new_embed.color = discord.Color.green()
         new_embed.add_field(
             name="✅ Статус",
-            value=f"Одобрено — {interaction.user.mention} ({datetime.now().strftime('%d.%m.%Y %H:%M')})",
+            value=f"Одобрено — {interaction.user.mention} ({now_msk().strftime('%d.%m.%Y %H:%M')} МСК)",
             inline=False,
         )
         await interaction.message.edit(embed=new_embed, view=None)
@@ -1987,7 +1987,7 @@ class ApplicationReviewView(ui.View):
                 color=0x2B2D31,
                 timestamp=datetime.now(),
             )
-            dm_embed.add_field(name="📅 Дата принятия", value=datetime.now().strftime("%d.%m.%Y %H:%M"), inline=True)
+            dm_embed.add_field(name="📅 Дата принятия", value=now_msk().strftime("%d.%m.%Y %H:%M") + " МСК", inline=True)
             dm_embed.add_field(name="👮 Одобрил", value=interaction.user.mention, inline=True)
             dm_embed.set_footer(text="DIAMOND", icon_url=_footer(interaction.guild_id))
             if _approve_gif(interaction.guild_id):
@@ -2333,7 +2333,7 @@ async def _create_event_message(channel, guild, title: str, max_count: int, imag
         return
 
     slots = {i: None for i in range(1, max_count + 1)}
-    join_mode = (cmd == "list")
+    join_mode = (cmd in ("list", "vzh"))
 
     embed = build_event_embed(guild.id, title, max_count, slots, image_ref, event_time=event_time, join_mode=join_mode)
 
@@ -3564,7 +3564,7 @@ async def замена_cmd(ctx, кого: int, на_кого: int = 0):
             data.get("image_url"), data.get("note"),
             event_time=data.get("event_time"), closed=data.get("closed", False),
             reserve=data.get("reserve", []),
-            join_mode=data.get("cmd") == "list",
+            join_mode=data.get("cmd") in ("list", "vzh"),
         )
         view = event_view(msg_id)
         await msg.edit(embed=embed, view=view)
@@ -7308,7 +7308,7 @@ async def afk_expire_loop():
                 since = data.get("since")
                 year = since.year if isinstance(since, datetime) else now_msk_dt.year
                 try:
-                    target = datetime(year, mon, day, hour, minute, tzinfo=MSK)
+                    target = datetime(year, mon, day, hour, minute)
                 except ValueError:
                     continue
                 if isinstance(since, datetime) and target < since:
@@ -7451,9 +7451,25 @@ async def backup_scheduler_loop():
         guild = bot.get_guild(guild_id)
         if guild:
             try:
-                await send_backup_now(guild)
+                ok = await send_backup_now(guild)
+                if not ok:
+                    print(f"WARNING: backup_scheduler_loop guild={guild_id}: send_backup_now returned False")
+                    channel = guild.get_channel(bs["channel_id"]) or bot.get_channel(bs["channel_id"])
+                    if channel:
+                        try:
+                            await channel.send("⚠️ Автобэкап не отправлен: проверь права бота в этом канале или список файлов.")
+                        except Exception:
+                            pass
             except Exception as e:
                 print(f"WARNING: backup_scheduler_loop guild={guild_id}: {e}")
+                guild_after = bot.get_guild(guild_id)
+                if guild_after:
+                    channel = guild_after.get_channel(bs["channel_id"]) or bot.get_channel(bs["channel_id"])
+                    if channel:
+                        try:
+                            await channel.send(f"⚠️ Автобэкап упал с ошибкой: {e}")
+                        except Exception:
+                            pass
 
 
 @backup_scheduler_loop.error

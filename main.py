@@ -1507,6 +1507,8 @@ class AfkModal(ui.Modal, title="🕐 Уход в АФК"):
                 ephemeral=True,
             )
 
+        await interaction.response.defer(ephemeral=True)
+
         if guild_id not in afk_list:
             afk_list[guild_id] = {}
 
@@ -1529,7 +1531,7 @@ class AfkModal(ui.Modal, title="🕐 Уход в АФК"):
             color=discord.Color.blurple(),
         )
         embed.set_footer(text="DIAMOND", icon_url=_footer(interaction.guild_id))
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 class RejectModal(ui.Modal, title="❌ Причина отклонения"):
@@ -1711,10 +1713,11 @@ class AfkView(ui.View):
         if guild_id not in afk_list or user_id not in afk_list[guild_id]:
             return await interaction.response.send_message("⚠️ Вас нет в АФК-списке!", ephemeral=True)
 
+        await interaction.response.defer(ephemeral=True)
         del afk_list[guild_id][user_id]
         save_data()
         await refresh_afk_message(interaction.guild)
-        await interaction.response.send_message("✅ Вы убраны из АФК-списка. С возвращением!", ephemeral=True)
+        await interaction.followup.send("✅ Вы убраны из АФК-списка. С возвращением!", ephemeral=True)
 
 
 class InactiveModal(ui.Modal, title="📅 Уход в инактив"):
@@ -1740,6 +1743,8 @@ class InactiveModal(ui.Modal, title="📅 Уход в инактив"):
                 ephemeral=True,
             )
 
+        await interaction.response.defer(ephemeral=True)
+
         if guild_id not in inactive_list:
             inactive_list[guild_id] = {}
 
@@ -1761,7 +1766,7 @@ class InactiveModal(ui.Modal, title="📅 Уход в инактив"):
             color=discord.Color.orange(),
         )
         embed.set_footer(text="DIAMOND", icon_url=_footer(interaction.guild_id))
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 class InactiveView(ui.View):
@@ -1782,10 +1787,11 @@ class InactiveView(ui.View):
         if guild_id not in inactive_list or user_id not in inactive_list[guild_id]:
             return await interaction.response.send_message("⚠️ Вас нет в списке инактива!", ephemeral=True)
 
+        await interaction.response.defer(ephemeral=True)
         del inactive_list[guild_id][user_id]
         save_data()
         await refresh_inactive_message(interaction.guild)
-        await interaction.response.send_message("✅ Вы убраны из инактива. С возвращением!", ephemeral=True)
+        await interaction.followup.send("✅ Вы убраны из инактива. С возвращением!", ephemeral=True)
 
 
 class TicketPanelView(ui.View):

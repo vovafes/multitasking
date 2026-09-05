@@ -1444,49 +1444,12 @@ def event_view(message_id: int) -> ui.View:
     return PaginatedEventView(message_id)
 
 
-async def _remove_user_from_all_events(guild_id: int, user_id: int):
-    """Убирает пользователя из слотов/резерва всех активных сборов сервера (например, при уходе в АФК)."""
-    for msg_id, data in list(event_lists.items()):
-        channel = bot.get_channel(data.get("channel_id"))
-        if not channel or channel.guild.id != guild_id:
-            continue
-
-        slots   = data.get("slots", {})
-        reserve = data.setdefault("reserve", [])
-        changed = False
-        for slot_num, uid in slots.items():
-            if uid == user_id:
-                slots[slot_num] = None
-                changed = True
-        if user_id in reserve:
-            reserve.remove(user_id)
-            changed = True
-        if not changed:
-            continue
-
-        try:
-            orig_msg = await channel.fetch_message(msg_id)
-            embed = build_event_embed(
-                guild_id, data["title"], data["max"], slots,
-                data.get("image_url"), data.get("note"),
-                event_time=data.get("event_time"), closed=data.get("closed", False),
-                reserve=reserve,
-                join_mode=data.get("cmd") in ("list", "vzh"),
-            )
-            view = event_view(msg_id)
-            await orig_msg.edit(embed=embed, view=view)
-        except Exception:
-            pass
-        await update_thread_list(msg_id)
-    save_data()
-
-
 # ─────────────────────────────────────────────
 # МОДАЛКИ
 # ─────────────────────────────────────────────
 class AfkModal(ui.Modal, title="🕐 Уход в АФК"):
     reason      = ui.TextInput(label="Причина", placeholder="На работе / Учёба / Дела...", required=True)
-    return_time = ui.TextInput(label="Вернусь (дата и время, например 25.05 18:30)", placeholder="25.05 18:30", required=True)
+    return_time = ui.TextInput(label="Вернусь в (например 18:30)", placeholder="18:30", required=True)
 
     async def on_submit(self, interaction: discord.Interaction):
         guild_id = interaction.guild_id
@@ -1494,20 +1457,13 @@ class AfkModal(ui.Modal, title="🕐 Уход в АФК"):
 
         raw = str(self.return_time).strip()
         import re as _re
-        m = _re.match(r"^(\d{2})\.(\d{2})\s+(\d{2}):(\d{2})$", raw)
+        m = _re.match(r"^([01]?\d|2[0-3]):([0-5]\d)$", raw)
         if not m:
             return await interaction.response.send_message(
-                "⚠️ Неверный формат времени. Используй формат **ДД.ММ ЧЧ:ММ**, например `25.05 18:30`",
+                "⚠️ Неверный формат времени. Используй формат **ЧЧ:ММ**, например `18:30`",
                 ephemeral=True,
             )
-        day, mon, hour, minute = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
-        if not (1 <= mon <= 12 and 1 <= day <= 31 and 0 <= hour <= 23 and 0 <= minute <= 59):
-            return await interaction.response.send_message(
-                "⚠️ Некорректная дата или время. Проверь, что день, месяц, часы и минуты указаны правильно.",
-                ephemeral=True,
-            )
-
-        await interaction.response.defer(ephemeral=True)
+        raw = f"{int(m.group(1)):02d}:{m.group(2)}"
 
         if guild_id not in afk_list:
             afk_list[guild_id] = {}
@@ -1520,7 +1476,6 @@ class AfkModal(ui.Modal, title="🕐 Уход в АФК"):
         save_data()
 
         await refresh_afk_message(interaction.guild)
-        await _remove_user_from_all_events(guild_id, user_id)
 
         embed = discord.Embed(
             description=(
@@ -1531,7 +1486,7 @@ class AfkModal(ui.Modal, title="🕐 Уход в АФК"):
             color=discord.Color.blurple(),
         )
         embed.set_footer(text="DIAMOND", icon_url=_footer(interaction.guild_id))
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 class RejectModal(ui.Modal, title="❌ Причина отклонения"):
@@ -7307,18 +7262,15 @@ async def afk_expire_loop():
         expired = []
         for uid, data in users.items():
             try:
-                m = _re.match(r"^(\d{2})\.(\d{2})\s+(\d{2}):(\d{2})$", data.get("return_time", "").strip())
+                m = _re.match(r"^(\d{2}):(\d{2})$", data.get("return_time", "").strip())
                 if not m:
                     continue
-                day, mon, hour, minute = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
                 since = data.get("since")
-                year = since.year if isinstance(since, datetime) else now_msk_dt.year
-                try:
-                    target = datetime(year, mon, day, hour, minute)
-                except ValueError:
+                if not isinstance(since, datetime):
                     continue
-                if isinstance(since, datetime) and target < since:
-                    target = target.replace(year=year + 1)
+                target = since.replace(hour=int(m.group(1)), minute=int(m.group(2)), second=0, microsecond=0)
+                if target <= since:
+                    target += timedelta(days=1)
                 if now_msk_dt >= target:
                     expired.append(uid)
             except Exception as e:

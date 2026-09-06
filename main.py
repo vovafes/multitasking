@@ -1319,10 +1319,11 @@ class NextPageButton(ui.Button):
 
 class PageIndicatorButton(ui.Button):
     """Неактивная кнопка-индикатор текущей страницы."""
-    def __init__(self, page: int, total_pages: int):
+    def __init__(self, message_id: int, page: int, total_pages: int):
         super().__init__(
             label=f"{page + 1}/{total_pages}",
             style=discord.ButtonStyle.secondary,
+            custom_id=f"pageindicator_{message_id}",
             disabled=True,
             row=2,
         )
@@ -1354,7 +1355,7 @@ class PaginatedEventView(ui.View):
 
         if total_pages > 1:
             self.add_item(PrevPageButton(message_id, page))
-            self.add_item(PageIndicatorButton(page, total_pages))
+            self.add_item(PageIndicatorButton(message_id, page, total_pages))
             self.add_item(NextPageButton(message_id, page, total_pages))
         self.add_item(ReserveButton(message_id))
         if has_image:
